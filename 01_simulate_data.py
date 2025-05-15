@@ -6,12 +6,14 @@ Neg Poisson logL gradient layer (in listmode)
 # %%
 from __future__ import annotations
 
-import array_api_compat.numpy as np
-import array_api_compat.torch as torch
+import array_api_compat.torch as torch  # we use the array_api_compat version of torch which is need for compatibility with parallelproj
+import torch.nn.functional as F
 
+import argparse
+import matplotlib.pyplot as plt
+import nibabel as nib
 import parallelproj
-from array_api_compat import size
-import array_api_compat.numpy as np
+
 import json
 from pathlib import Path
 from dataclasses import asdict
@@ -22,8 +24,40 @@ if parallelproj.cuda_present:
 else:
     dev = "cpu"
 
-seed = 1
-fwhm_data_mm = 4.5
+
+# input parameters
+parser = argparse.ArgumentParser(description="Simulate PET data parameters")
+parser.add_argument(
+    "--seed", type=int, default=1, help="Seed for random noise generator"
+)
+parser.add_argument(
+    "--fwhm_data_mm",
+    type=float,
+    default=4.5,
+    help="Simulated resolution of PET scanner (FWHM in mm)",
+)
+parser.add_argument("--subject_num", type=int, default=4, help="Brainweb subject id")
+parser.add_argument(
+    "--contrast_num",
+    type=int,
+    default=0,
+    help="Simulated contrast number (0, 1, or 2)",
+    choices=[0, 1, 2],
+)
+parser.add_argument(
+    "--countlevel",
+    type=float,
+    default=1.0,
+    help="Relative count level (higher means more counts and less noise)",
+)
+
+args = parser.parse_args()
+
+seed: int = args.seed
+fwhm_data_mm: float = args.fwhm_data_mm
+subject_num: int = args.subject_num
+contrast_num: int = args.contrast_num
+countlevel: float = args.countlevel
 
 # %%
 # Simulation of PET data in sinogram space
@@ -41,27 +75,79 @@ fwhm_data_mm = 4.5
 # image-based resolution model, a non-TOF PET projector and an attenuation model
 #
 
-num_rings = 5
+num_rings = 32
 scanner = parallelproj.RegularPolygonPETScannerGeometry(
     torch,
     dev,
-    radius=65.0,
-    num_sides=12,
-    num_lor_endpoints_per_side=15,
-    lor_spacing=2.3,
-    ring_positions=torch.linspace(-10, 10, num_rings),
+    radius=300.0,
+    num_sides=28,
+    num_lor_endpoints_per_side=16,
+    lor_spacing=4.0,
+    ring_positions=0.5 * 5.0 * num_rings * torch.linspace(-1, 1, num_rings),
     symmetry_axis=2,
 )
 
-# setup the LOR descriptor that defines the sinogram
+# load the activity and attenuation images
 
-img_shape = (40, 40, 8)
-voxel_size = (2.0, 2.0, 2.0)
+act_nii = nib.as_closest_canonical(
+    nib.load(
+        Path("data")
+        / "brainweb_petmr_v2"
+        / f"subject{subject_num:02}"
+        / f"image_{contrast_num}.nii.gz"
+    )
+)
+
+# Find the last slice along the z-axis where the sum is > 0
+act_data = act_nii.get_fdata()
+z_indices = [z for z in range(act_data.shape[2]) if act_data[:, :, z].sum() > 0]
+last_nonzero_z = z_indices[-1] if z_indices else act_data.shape[2] - 1
+
+end_sl = max(last_nonzero_z + 1, act_data.shape[2])
+start_sl = end_sl - 158
+
+x_true = torch.as_tensor(act_data, dtype=torch.float32, device=dev)
+
+att_nii = nib.as_closest_canonical(
+    nib.load(
+        Path("data")
+        / "brainweb_petmr_v2"
+        / f"subject{subject_num:02}"
+        / f"attenuation_image.nii.gz"
+    )
+)
+
+x_att = torch.as_tensor(att_nii.get_fdata(), dtype=torch.float32, device=dev)
+
+# %%
+# skip first and last 15 slices to reduce the problem size
+
+x_true = x_true[:, :, start_sl:end_sl]
+x_att = x_att[:, :, start_sl:end_sl]
+
+# %%
+# reduce the image size by a factor of 2 to speed up the simulation
+
+x_true = (
+    F.avg_pool3d(x_true.unsqueeze(0).unsqueeze(0), kernel_size=2, stride=2)
+    .squeeze(0)
+    .squeeze(0)
+)
+x_att = (
+    F.avg_pool3d(x_att.unsqueeze(0).unsqueeze(0), kernel_size=2, stride=2)
+    .squeeze(0)
+    .squeeze(0)
+)
+
+img_shape = tuple(x_true.shape)
+voxel_size = tuple((2 * act_nii.header["pixdim"][1:4]).tolist())
+
+# setup the sinogram projector
 
 lor_desc = parallelproj.RegularPolygonPETLORDescriptor(
     scanner,
     radial_trim=10,
-    max_ring_difference=2,
+    max_ring_difference=10,  # we use "smaller" max rings difference to speed up the simulation
     sinogram_order=parallelproj.SinogramSpatialAxisOrder.RVP,
 )
 
@@ -69,28 +155,15 @@ proj = parallelproj.RegularPolygonPETProjector(
     lor_desc, img_shape=img_shape, voxel_size=voxel_size
 )
 
-# setup a simple test image containing a few "hot rods"
-x_true = torch.ones(proj.in_shape, device=dev, dtype=torch.float32)
-c0 = proj.in_shape[0] // 2
-c1 = proj.in_shape[1] // 2
-x_true[(c0 - 2) : (c0 + 2), (c1 - 2) : (c1 + 2), :] = 5.0
-x_true[4, c1, 2:] = 5.0
-x_true[c0, 4, :-2] = 5.0
-
-x_true[:2, :, :] = 0
-x_true[-2:, :, :] = 0
-x_true[:, :2, :] = 0
-x_true[:, -2:, :] = 0
-
-
 # %%
 # Attenuation image and sinogram setup
 # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-# setup an attenuation image
-x_att = 0.01 * torch.astype(x_true > 0, torch.float32)
 # calculate the attenuation sinogram
 att_sino = torch.exp(-proj(x_att))
+
+# we artficially lowe the attenuation (sensitivity) sinogram to get by default a lower numbrt of counts
+att_sino *= countlevel * 0.01
 
 # %%
 # Complete PET forward model setup
@@ -102,7 +175,7 @@ att_sino = torch.exp(-proj(x_att))
 
 # enable TOF - comment if you want to run non-TOF
 proj.tof_parameters = parallelproj.TOFParameters(
-    num_tofbins=13, tofbin_width=12.0, sigma_tof=12.0
+    num_tofbins=17, tofbin_width=12.0, sigma_tof=12.0
 )
 
 # setup the attenuation multiplication operator which is different
@@ -147,12 +220,7 @@ contamination = torch.full(
 noise_free_data += contamination
 
 # add Poisson noise
-np.random.seed(seed)
-y = torch.asarray(
-    np.random.poisson(parallelproj.to_numpy_array(noise_free_data)),
-    device=dev,
-    dtype=torch.int16,
-)
+y = torch.poisson(noise_free_data).to(torch.uint16)
 
 # %%
 # Conversion of the emission sinogram to listmode
@@ -198,18 +266,64 @@ lm_proj.tof = proj.tof
 # create the contamination list
 contamination_list = torch.full(
     event_start_coords.shape[0],
-    float(torch.reshape(contamination, (size(contamination),))[0]),
+    float(contamination.ravel()[0]),
     device=dev,
     dtype=torch.float32,
 )
 
 lm_pet_lin_op = parallelproj.CompositeLinearOperator((lm_att_op, lm_proj, res_model))
 
+
+# %%
+def neg_poisson_logL_grad(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Calculate the gradient of the negative Poisson log-likelihood
+    for a random image x using the LM projector and contamination list.
+    """
+    # affine forward model evaluated at x
+    z_lm = lm_pet_lin_op(x) + contamination_list
+
+    # calculate the gradient
+    lm_grad = adjoint_ones - lm_pet_lin_op.adjoint(1 / z_lm)
+
+    return lm_grad
+
+
+# %%
+# run quick LM MLEM
+
+x_mlem = torch.ones_like(x_true)
+num_iter = 100
+
+for i in range(num_iter):
+    print(f"LM iteration {(i+1):03}/{num_iter}", end="\r")
+    if i == 20:
+        x_mlem_20 = x_mlem.clone()
+
+    neg_pl_grad = neg_poisson_logL_grad(x_mlem)
+    step = x_mlem / adjoint_ones
+
+    x_mlem -= step * neg_pl_grad
+
+print()
+
+# setup a Gaussian post-filter operator
+post_filter = parallelproj.GaussianFilterOperator(
+    x_mlem.shape, sigma=4.5 / (2.35 * lm_proj.voxel_size)
+)
+
+x_mlem_20_filtered = post_filter(x_mlem_20)
+x_mlem_filtered = post_filter(x_mlem)
+
 # %%
 # save all data to disk such that we can re-use it later (e.g. using a torch data loader)
 
-odir = Path(f"lm_dataset_{seed:03}")
-odir.mkdir(exist_ok=True)
+odir = Path(
+    f"data/sim_pet_data/subject{subject_num:02}_contrast_{contrast_num}_countlevel_{countlevel}_seed_{seed}"
+)
+odir.mkdir(exist_ok=True, parents=True)
 
 torch.save(
     {
@@ -219,11 +333,17 @@ torch.save(
         "att_list": att_list,
         "contamination_list": contamination_list,
         "adjoint_ones": adjoint_ones,
+        "x_true": x_true,
+        "x_att": x_att,
+        "x_mlem": x_mlem,
+        "x_mlem_20": x_mlem_20,
+        "x_mlem_filtered": x_mlem_filtered,
+        "x_mlem_20_filtered": x_mlem_20_filtered,
     },
     odir / "input_tensors.pt",
 )
 
-with open(odir / "projector_parameters.json", "w") as f:
+with open(odir / "projector_parameters.json", "w", encoding="UTF8") as f:
     json.dump(
         {
             "tof_parameters": asdict(lm_proj.tof_parameters),
@@ -237,6 +357,38 @@ with open(odir / "projector_parameters.json", "w") as f:
         indent=4,
     )
 
+# %%
+# show a few images
+
+sl0 = img_shape[0] // 2
+sl1 = img_shape[1] // 2
+sl2 = img_shape[2] // 2
+
+
+kws = dict(cmap="Greys", vmin=0, vmax=1.5 * float(torch.max(x_true)), origin="lower")
+
+fig, ax = plt.subplots(3, 3, figsize=(8, 8), layout="constrained")
+ax[0, 0].imshow(x_true[:, :, sl2].cpu().numpy().T, **kws)
+ax[0, 1].imshow(x_true[sl0, :, :].cpu().numpy().T, **kws)
+ax[0, 2].imshow(x_true[:, sl1, :].cpu().numpy().T, **kws)
+ax[1, 0].imshow(x_mlem_20_filtered[:, :, sl2].cpu().numpy().T, **kws)
+ax[1, 1].imshow(x_mlem_20_filtered[sl0, :, :].cpu().numpy().T, **kws)
+ax[1, 2].imshow(x_mlem_20_filtered[:, sl1, :].cpu().numpy().T, **kws)
+ax[2, 0].imshow(x_mlem_filtered[:, :, sl2].cpu().numpy().T, **kws)
+ax[2, 1].imshow(x_mlem_filtered[sl0, :, :].cpu().numpy().T, **kws)
+ax[2, 2].imshow(x_mlem_filtered[:, sl1, :].cpu().numpy().T, **kws)
+
+for axx in ax.ravel():
+    axx.set_xticks([])
+    axx.set_yticks([])
+
+ax[0, 1].set_title("ground truth", fontsize="medium")
+ax[1, 1].set_title("MLEM 20 it. + post-filter", fontsize="medium")
+ax[2, 1].set_title("MLEM 100 it. + post-filter", fontsize="medium")
+
+fig.show()
+
+fig.savefig(odir / "mlem_recons.png", dpi=300)
 
 ## %%
 ## calculate what is needed for a pytorch negative Poisson logL gradient descent layer
