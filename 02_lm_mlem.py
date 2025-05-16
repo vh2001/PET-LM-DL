@@ -5,7 +5,7 @@ import parallelproj
 import torch
 
 from pathlib import Path
-from utils import load_lm_pet_data
+from data_utils import load_lm_pet_data
 
 # using torch valid choices are 'cpu' or 'cuda'
 if parallelproj.cuda_present:

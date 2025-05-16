@@ -1,6 +1,6 @@
 import torch
 
-from utils import load_lm_pet_data, LMNegPoissonLogLGradientLayer
+from data_utils import load_lm_pet_data, LMNegPoissonLogLGradientLayer
 from pathlib import Path
 
 odirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))
