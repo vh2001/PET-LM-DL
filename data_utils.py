@@ -2,6 +2,7 @@ import json
 import torch
 import parallelproj
 from pathlib import Path
+from array_api_compat import device
 
 
 def load_lm_pet_data(odir: Path):
@@ -45,7 +46,9 @@ def load_lm_pet_data(odir: Path):
     lm_att_op = parallelproj.ElementwiseMultiplicationOperator(att_list)
 
     res_model = parallelproj.GaussianFilterOperator(
-        in_shape, sigma=fwhm_data_mm / (2.35 * torch.tensor(voxel_size))
+        in_shape,
+        sigma=fwhm_data_mm
+        / (2.35 * torch.tensor(voxel_size, dtype=torch.float32).to(device(x_true))),
     )
 
     lm_pet_lin_op = parallelproj.CompositeLinearOperator(
@@ -67,14 +70,21 @@ class BrainwebLMPETDataset(torch.utils.data.Dataset):
       - adjoint_ones
     """
 
-    def __init__(self, data_dirs: list[Path]):
-        self.data_dirs = data_dirs
+    def __init__(self, data_dirs: list[Path], shuffle: bool = True):
+        self._data_dirs = data_dirs.copy()
+        if shuffle:
+            idx = torch.randperm(len(self._data_dirs))
+            self._data_dirs = [self._data_dirs[i] for i in idx]
+
+    @property
+    def data_dirs(self):
+        return self._data_dirs
 
     def __len__(self):
-        return len(self.data_dirs)
+        return len(self._data_dirs)
 
     def __getitem__(self, idx):
-        odir = self.data_dirs[idx]
+        odir = self._data_dirs[idx]
         lm_pet_lin_op, contamination_list, adjoint_ones, x_true = load_lm_pet_data(odir)
         input_img = torch.load(odir / "mlem_reconstructions.pt")[
             "x_mlem_early_filtered"
@@ -88,8 +98,40 @@ class BrainwebLMPETDataset(torch.utils.data.Dataset):
         }
 
 
+def brainweb_collate_fn(batch):
+    # batch is a list of dicts
+    return {
+        "input": torch.stack([item["input"].unsqueeze(0) for item in batch]),
+        "target": torch.stack([item["target"].unsqueeze(0) for item in batch]),
+        "lm_pet_lin_ops": [item["lm_pet_lin_op"] for item in batch],
+        "contamination_lists": [item["contamination_list"] for item in batch],
+        "adjoint_ones": [item["adjoint_ones"] for item in batch],
+        "diag_preconds": [
+            item["target"] / item["adjoint_ones"] + 1e-6 for item in batch
+        ],
+    }
+
+
 if __name__ == "__main__":
+    from utils import LMNegPoissonLogLGradientLayer
+
+    torch.manual_seed(42)
+
     dataset = BrainwebLMPETDataset(
         sorted(list(Path("data/sim_pet_data").glob("subject*")))
     )
-    d0 = dataset[0]
+
+    # from torch.utils.data import DataLoader
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=3, collate_fn=brainweb_collate_fn
+    )
+    batch = next(iter(loader))
+
+    lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
+    logL_grads = lm_logL_grad_layer(
+        batch["input"],
+        batch["lm_pet_lin_ops"],
+        batch["contamination_lists"],
+        batch["adjoint_ones"],
+        batch["diag_preconds"],
+    )
