@@ -57,18 +57,20 @@ def load_lm_pet_data(odir: Path):
     return lm_pet_lin_op, contamination_list, adjoint_ones, x_true
 
 
-class LMPoissonLogLDescent(torch.autograd.Function):
+class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
     """
     Function representing a linear operator acting on a mini batch of single channel images
     """
 
     @staticmethod
     def forward(
+        ctx,
         x: torch.Tensor,
         lm_fwd_operators: list[parallelproj.LinearOperator],
         contam_lists: list[torch.Tensor],
         adjoint_ones: list[torch.Tensor],
-    ) -> [torch.Tensor, torch.Tensor]:
+        diag_precond_list: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """forward pass of listmode negative Poisson logL gradient descent layer
 
         Parameters
@@ -82,6 +84,8 @@ class LMPoissonLogLDescent(torch.autograd.Function):
         adjoint_ones : torch.Tensor
             list of 3D images of adjoint of the (full not listmode) linear operator applied to ones
             (num_voxels_x, num_voxels_y, num_voxels_z)
+        diag_precond_list : list of torch.Tensors
+            list of diagonal preconditioners with dimension (num_voxels_x, num_voxels_y, num_voxels_z)
 
         Returns
         -------
@@ -89,32 +93,37 @@ class LMPoissonLogLDescent(torch.autograd.Function):
             mini batch of 3D images with dimension (batch_size, lm_fwd_operator.out_shape)
         """
 
+        # https://pytorch.org/docs/stable/notes/extending.html#how-to-use
+        ctx.set_materialize_grads(False)
+
         batch_size = x.shape[0]
 
-        g = torch.zeros_like(x)
-        z_lm = torch.zeros_like(x)
+        g = torch.zeros(
+            (batch_size,) + lm_fwd_operators[0].in_shape,
+            dtype=x.dtype,
+            device=device(x),
+        )
+        z_lists = []
 
         # loop over all samples in the batch and apply linear operator
         # to the first channel
         for i in range(batch_size):
-            z_lm[i, ...] = lm_fwd_operators[i](x[i, 0, ...].detach()) + contam_lists[i]
-            g[i, ...] = adjoint_ones[i] - lm_fwd_operators[i].adjoint(1 / z_lm[i, ...])
+            z_lists.append(lm_fwd_operators[i](x[i, 0, ...].detach()) + contam_lists[i])
+            g[i, ...] = (
+                adjoint_ones[i] - lm_fwd_operators[i].adjoint(1 / z_lists[i])
+            ) * diag_precond_list[i]
 
-        return g, z_lm
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        # https://pytorch.org/docs/stable/notes/extending.html#how-to-use
-        _, lm_fwd_operators, _, _ = inputs
-        g, z_lm = output
-        ctx.set_materialize_grads(False)
         ctx.lm_fwd_operators = lm_fwd_operators
-        ctx.save_for_backward(z_lm)
+        ctx.z_lists = z_lists
+        ctx.diag_precond_list = diag_precond_list
+
+        return g
 
     @staticmethod
+    @torch.autograd.function.once_differentiable
     def backward(
         ctx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None, None]:
+    ) -> tuple[torch.Tensor, None, None, None, None]:
         """backward pass of the forward pass
 
         Parameters
@@ -136,10 +145,11 @@ class LMPoissonLogLDescent(torch.autograd.Function):
         # since forward takes four input arguments (x, lm_fwd_operator, contam_list, adjoint_ones)
         # we have to return four arguments (the last three are None)
         if grad_output is None:
-            return None, None, None, None
+            return None, None, None, None, None
         else:
             lm_fwd_operators = ctx.lm_fwd_operators
-            (z_lm,) = ctx.saved_tensors
+            z_lists = ctx.z_lists
+            diag_precond_list = ctx.diag_precond_list
 
             batch_size = grad_output.shape[0]
 
@@ -152,9 +162,12 @@ class LMPoissonLogLDescent(torch.autograd.Function):
             # loop over all samples in the batch and apply linear operator
             # to the first channel
             for i in range(batch_size):
-                x[i, 0, ...] = lm_fwd_operators[i].adjoint(
-                    lm_fwd_operators[i](grad_output[i, ...].detach())
-                    / z_lm[i, ...] ** 2
+                x[i, 0, ...] = (
+                    lm_fwd_operators[i].adjoint(
+                        lm_fwd_operators[i](grad_output[i, ...].detach())
+                        / z_lists[i] ** 2
+                    )
+                    * diag_precond_list[i]
                 )
 
-            return x, None, None, None
+            return x, None, None, None, None
