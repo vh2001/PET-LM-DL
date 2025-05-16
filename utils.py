@@ -44,18 +44,14 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
 
         batch_size = x.shape[0]
 
-        g = torch.zeros(
-            (batch_size,) + lm_fwd_operators[0].in_shape,
-            dtype=x.dtype,
-            device=device(x),
-        )
+        g = torch.zeros_like(x)
         z_lists = []
 
         # loop over all samples in the batch and apply linear operator
         # to the first channel
         for i in range(batch_size):
             z_lists.append(lm_fwd_operators[i](x[i, 0, ...].detach()) + contam_lists[i])
-            g[i, ...] = (
+            g[i, 0, ...] = (
                 adjoint_ones[i] - lm_fwd_operators[i].adjoint(1 / z_lists[i])
             ) * diag_precond_list[i]
 
@@ -99,18 +95,14 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
 
             batch_size = grad_output.shape[0]
 
-            x = torch.zeros(
-                (batch_size, 1) + lm_fwd_operators[0].in_shape,
-                dtype=grad_output.dtype,
-                device=device(grad_output),
-            )
+            x = torch.zeros_like(grad_output)
 
             # loop over all samples in the batch and apply linear operator
             # to the first channel
             for i in range(batch_size):
                 x[i, 0, ...] = (
                     lm_fwd_operators[i].adjoint(
-                        lm_fwd_operators[i](grad_output[i, ...].detach())
+                        lm_fwd_operators[i](grad_output[i, 0, ...].detach())
                         / z_lists[i] ** 2
                     )
                     * diag_precond_list[i]

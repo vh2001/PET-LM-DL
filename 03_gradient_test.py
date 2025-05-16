@@ -1,3 +1,6 @@
+# this script tests whether the backward pass of the LMNegPoissonLogLGradientLayer is correct.
+# Unfortunately, this tests takes very long - on data with the usual problem size
+
 import torch
 
 from data_utils import load_lm_pet_data
