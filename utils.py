@@ -64,66 +64,57 @@ class LMPoissonLogLDescent(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx,
         x: torch.Tensor,
-        lm_fwd_operator: parallelproj.LinearOperator,
-        contam_list: torch.Tensor,
-        adjoint_ones: torch.Tensor,
-    ) -> torch.Tensor:
+        lm_fwd_operators: list[parallelproj.LinearOperator],
+        contam_lists: list[torch.Tensor],
+        adjoint_ones: list[torch.Tensor],
+    ) -> [torch.Tensor, torch.Tensor]:
         """forward pass of listmode negative Poisson logL gradient descent layer
 
         Parameters
         ----------
-        ctx : context object
-            that can be used to store information for the backward pass
         x : torch.Tensor
-            mini batch of 3D images with dimension (batch_size = 1, 1, num_voxels_x, num_voxels_y, num_voxels_z)
-        lm_fwd_operator : parallelproj.LinearOperator in listmode
-            linear operator that can act on a single 3D image
-        contam_list : torch.Tensor
-            listmode contamination (scatter and randoms) with dimension (batch_size = 1, num_events)
+            mini batch of 3D images with dimension (batch_size, 1, num_voxels_x, num_voxels_y, num_voxels_z)
+        lm_fwd_operators : list of parallelproj.LinearOperator in listmode
+            each linear operator that can act on a single 3D image
+        contam_lists : list of torch.Tensors
+            list of listmode contamination (scatter and randoms) with dimension (num_events)
         adjoint_ones : torch.Tensor
-            minibatch of 3D images of adjoint of the (full not listmode) linear operator applied to ones
-            (batch_size = 1, num_voxels_x, num_voxels_y, num_voxels_z)
+            list of 3D images of adjoint of the (full not listmode) linear operator applied to ones
+            (num_voxels_x, num_voxels_y, num_voxels_z)
 
         Returns
         -------
         torch.Tensor
-            mini batch of 3D images with dimension (batch_size = 1, lm_fwd_operator.out_shape)
+            mini batch of 3D images with dimension (batch_size, lm_fwd_operator.out_shape)
         """
-
-        # https://pytorch.org/docs/stable/notes/extending.html#how-to-use
-        ctx.set_materialize_grads(False)
-        ctx.lm_fwd_operator = lm_fwd_operator
 
         batch_size = x.shape[0]
 
-        if batch_size != 1:
-            raise ValueError(
-                "Because of object dependent LM linear operators, the batch size must be 1 for now"
-            )
-
-        g = torch.zeros(
-            (batch_size,) + lm_fwd_operator.in_shape, dtype=x.dtype, device=device(x)
-        )
-
-        z_lm = torch.zeros(
-            (batch_size,) + lm_fwd_operator.out_shape, dtype=x.dtype, device=device(x)
-        )
+        g = torch.zeros_like(x)
+        z_lm = torch.zeros_like(x)
 
         # loop over all samples in the batch and apply linear operator
         # to the first channel
         for i in range(batch_size):
-            z_lm[i, ...] = lm_fwd_operator(x[i, 0, ...].detach()) + contam_list[i, ...]
-            g[i, ...] = adjoint_ones[i, ...] - lm_fwd_operator.adjoint(1 / z_lm[i, ...])
+            z_lm[i, ...] = lm_fwd_operators[i](x[i, 0, ...].detach()) + contam_lists[i]
+            g[i, ...] = adjoint_ones[i] - lm_fwd_operators[i].adjoint(1 / z_lm[i, ...])
 
-        # save z for the backward pass
-        ctx.save_for_backward(z_lm)
-
-        return g
+        return g, z_lm
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+    def setup_context(ctx, inputs, output):
+        # https://pytorch.org/docs/stable/notes/extending.html#how-to-use
+        _, lm_fwd_operators, _, _ = inputs
+        g, z_lm = output
+        ctx.set_materialize_grads(False)
+        ctx.lm_fwd_operators = lm_fwd_operators
+        ctx.save_for_backward(z_lm)
+
+    @staticmethod
+    def backward(
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None, None]:
         """backward pass of the forward pass
 
         Parameters
@@ -147,18 +138,13 @@ class LMPoissonLogLDescent(torch.autograd.Function):
         if grad_output is None:
             return None, None, None, None
         else:
-            lm_fwd_operator = ctx.lm_fwd_operator
-            z_lm = ctx.saved_tensors[0]
+            lm_fwd_operators = ctx.lm_fwd_operators
+            (z_lm,) = ctx.saved_tensors
 
             batch_size = grad_output.shape[0]
 
-            if batch_size != 1:
-                raise ValueError(
-                    "Because of object dependent LM linear operators, the batch size must be 1 for now"
-                )
-
             x = torch.zeros(
-                (batch_size, 1) + lm_fwd_operator.in_shape,
+                (batch_size, 1) + lm_fwd_operators[0].in_shape,
                 dtype=grad_output.dtype,
                 device=device(grad_output),
             )
@@ -166,8 +152,9 @@ class LMPoissonLogLDescent(torch.autograd.Function):
             # loop over all samples in the batch and apply linear operator
             # to the first channel
             for i in range(batch_size):
-                x[i, 0, ...] = lm_fwd_operator.adjoint(
-                    lm_fwd_operator(grad_output[i, ...].detach()) / z_lm[i, ...] ** 2
+                x[i, 0, ...] = lm_fwd_operators[i].adjoint(
+                    lm_fwd_operators[i](grad_output[i, ...].detach())
+                    / z_lm[i, ...] ** 2
                 )
 
             return x, None, None, None
