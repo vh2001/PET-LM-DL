@@ -5,6 +5,7 @@ import parallelproj
 import torch
 
 from pathlib import Path
+from utils import load_lm_pet_data
 
 # using torch valid choices are 'cpu' or 'cuda'
 if parallelproj.cuda_present:
@@ -16,23 +17,8 @@ else:
 parser = argparse.ArgumentParser(
     description="Listmode MLEM reconstruction of simulated PET data"
 )
-parser.add_argument(
-    "--seed", type=int, default=1, help="Seed for random noise generator"
-)
-parser.add_argument("--subject_num", type=int, default=4, help="Brainweb subject id")
-parser.add_argument(
-    "--contrast_num",
-    type=int,
-    default=0,
-    help="Simulated contrast number (0, 1, or 2)",
-    choices=[0, 1, 2],
-)
-parser.add_argument(
-    "--countlevel",
-    type=float,
-    default=1.0,
-    help="Relative count level (higher means more counts and less noise)",
-)
+parser.add_argument("odir", type=str, default=1, help="Seed for random noise generator")
+
 parser.add_argument(
     "--fwhm_postfilter_mm",
     type=float,
@@ -42,62 +28,14 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-seed: int = args.seed
-subject_num: int = args.subject_num
-contrast_num: int = args.contrast_num
-countlevel: float = args.countlevel
+odir = Path(args.odir)
 
 # fixed input parameters
-fwhm_data_mm: float = 4.5
 num_iter: int = 100
 num_iter_early: int = 20
 fwhm_postfilter_mm: float = args.fwhm_postfilter_mm
 
-# %%
-# load saved data
-odir = Path(
-    f"data/sim_pet_data/subject{subject_num:02}_contrast_{contrast_num}_countlevel_{countlevel}_seed_{seed}"
-)
-
-data_tensors = torch.load(odir / "data_tensors.pt")
-
-event_start_coords = data_tensors["event_start_coords"]
-event_end_coords = data_tensors["event_end_coords"]
-event_tofbins = data_tensors["event_tofbins"]
-att_list = data_tensors["att_list"]
-contamination_list = data_tensors["contamination_list"]
-adjoint_ones = data_tensors["adjoint_ones"]
-x_true = data_tensors["x_true"]
-
-with open(odir / "projector_parameters.json", "r", encoding="UTF8") as f:
-    projector_parameters = json.load(f)
-
-in_shape = tuple(projector_parameters["in_shape"])
-voxel_size = tuple(projector_parameters["voxel_size"])
-img_origin = tuple(projector_parameters["img_origin"])
-fwhm_data_mm = projector_parameters["fwhm_data_mm"]
-tof_parameters = parallelproj.TOFParameters(**projector_parameters["tof_parameters"])
-
-lm_proj = parallelproj.ListmodePETProjector(
-    event_start_coords,
-    event_end_coords,
-    in_shape,
-    voxel_size,
-    img_origin,
-)
-
-# enable TOF in the LM projector
-lm_proj.tof_parameters = tof_parameters
-lm_proj.event_tofbins = event_tofbins
-lm_proj.tof = True
-
-lm_att_op = parallelproj.ElementwiseMultiplicationOperator(att_list)
-
-res_model = parallelproj.GaussianFilterOperator(
-    in_shape, sigma=fwhm_data_mm / (2.35 * torch.tensor(voxel_size))
-)
-# %%
-lm_pet_lin_op = parallelproj.CompositeLinearOperator((lm_att_op, lm_proj, res_model))
+lm_pet_lin_op, contamination_list, adjoint_ones, x_true = load_lm_pet_data(odir)
 
 
 def neg_poisson_logL_grad(
@@ -141,7 +79,7 @@ print()
 
 # setup a Gaussian post-filter operator
 post_filter = parallelproj.GaussianFilterOperator(
-    x_mlem.shape, sigma=fwhm_postfilter_mm / (2.35 * lm_proj.voxel_size)
+    x_mlem.shape, sigma=fwhm_postfilter_mm / (2.35 * lm_pet_lin_op[1].voxel_size)
 )
 
 x_mlem_early_filtered = post_filter(x_mlem_early)
@@ -160,8 +98,8 @@ torch.save(
 with open(odir / "mlem_parameters.json", "w", encoding="UTF8") as f:
     json.dump(
         {
-            "voxel_size": voxel_size,
-            "img_origin": img_origin,
+            "voxel_size": tuple(lm_pet_lin_op[1].voxel_size.tolist()),
+            "img_origin": tuple(lm_pet_lin_op[1]._img_origin.tolist()),
             "fwhm_postfilter_mm": fwhm_postfilter_mm,
             "num_iter": num_iter,
             "num_iter_early": num_iter_early,
@@ -174,9 +112,9 @@ with open(odir / "mlem_parameters.json", "w", encoding="UTF8") as f:
 # %%
 # show a few images
 
-sl0 = in_shape[0] // 2
-sl1 = in_shape[1] // 2
-sl2 = in_shape[2] // 3
+sl0 = lm_pet_lin_op.in_shape[0] // 2
+sl1 = lm_pet_lin_op.in_shape[1] // 2
+sl2 = lm_pet_lin_op.in_shape[2] // 3
 
 
 kws = dict(cmap="Greys", vmin=0, vmax=1.5 * float(torch.max(x_true)), origin="lower")
