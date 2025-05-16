@@ -10,7 +10,6 @@ import array_api_compat.torch as torch  # we use the array_api_compat version of
 import torch.nn.functional as F
 
 import argparse
-import matplotlib.pyplot as plt
 import nibabel as nib
 import parallelproj
 
@@ -30,12 +29,7 @@ parser = argparse.ArgumentParser(description="Simulate PET data parameters")
 parser.add_argument(
     "--seed", type=int, default=1, help="Seed for random noise generator"
 )
-parser.add_argument(
-    "--fwhm_data_mm",
-    type=float,
-    default=4.5,
-    help="Simulated resolution of PET scanner (FWHM in mm)",
-)
+
 parser.add_argument("--subject_num", type=int, default=4, help="Brainweb subject id")
 parser.add_argument(
     "--contrast_num",
@@ -50,15 +44,26 @@ parser.add_argument(
     default=1.0,
     help="Relative count level (higher means more counts and less noise)",
 )
+parser.add_argument(
+    "--fwhm_postfilter_mm",
+    type=float,
+    default=4.5,
+    help="FWHM of Gaussian post-filter in mm",
+)
 
 args = parser.parse_args()
 
 seed: int = args.seed
-fwhm_data_mm: float = args.fwhm_data_mm
 subject_num: int = args.subject_num
 contrast_num: int = args.contrast_num
 countlevel: float = args.countlevel
 
+fwhm_postfilter_mm: float = args.fwhm_postfilter_mm
+
+# fixed input parameters
+fwhm_data_mm: float = 4.5
+num_iter: int = 100
+num_iter_early: int = 20
 # %%
 # Simulation of PET data in sinogram space
 # ----------------------------------------
@@ -195,6 +200,8 @@ pet_lin_op = parallelproj.CompositeLinearOperator((att_op, proj, res_model))
 # calculate the adjoint of the forward model applied to a ones sinogram
 # needed to calculate the gradient of the negative Poisson log-likelihood (in listmode)
 
+print("Calculating adjoint of the forward model applied to a ones sinogram")
+
 adjoint_ones = pet_lin_op.adjoint(
     torch.ones(pet_lin_op.out_shape, device=dev, dtype=torch.float32)
 )
@@ -205,6 +212,8 @@ adjoint_ones = pet_lin_op.adjoint(
 #
 # We setup an arbitrary ground truth :math:`x_{true}` and simulate
 # noise-free and noisy data :math:`y` by adding Poisson noise.
+
+print("Simulating noise-free and noisy sinogram data")
 
 # simulated noise-free data
 noise_free_data = pet_lin_op(x_true)
@@ -230,6 +239,8 @@ y = torch.poisson(noise_free_data).to(torch.uint16)
 # integer non-TOF or TOF sinogram to an event list for listmode processing.
 #
 # **Note:** The create event list is sorted and should be shuffled running LM-MLEM.
+
+print("Generating listmode data from noisy sinogram data")
 
 event_start_coords, event_end_coords, event_tofbins = proj.convert_sinogram_to_listmode(
     y
@@ -271,52 +282,6 @@ contamination_list = torch.full(
     dtype=torch.float32,
 )
 
-lm_pet_lin_op = parallelproj.CompositeLinearOperator((lm_att_op, lm_proj, res_model))
-
-
-# %%
-def neg_poisson_logL_grad(
-    x: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Calculate the gradient of the negative Poisson log-likelihood
-    for a random image x using the LM projector and contamination list.
-    """
-    # affine forward model evaluated at x
-    z_lm = lm_pet_lin_op(x) + contamination_list
-
-    # calculate the gradient
-    lm_grad = adjoint_ones - lm_pet_lin_op.adjoint(1 / z_lm)
-
-    return lm_grad
-
-
-# %%
-# run quick LM MLEM
-
-x_mlem = torch.ones_like(x_true)
-num_iter = 100
-
-for i in range(num_iter):
-    print(f"LM iteration {(i+1):03}/{num_iter}", end="\r")
-    if i == 20:
-        x_mlem_20 = x_mlem.clone()
-
-    neg_pl_grad = neg_poisson_logL_grad(x_mlem)
-    step = x_mlem / adjoint_ones
-
-    x_mlem -= step * neg_pl_grad
-
-print()
-
-# setup a Gaussian post-filter operator
-post_filter = parallelproj.GaussianFilterOperator(
-    x_mlem.shape, sigma=4.5 / (2.35 * lm_proj.voxel_size)
-)
-
-x_mlem_20_filtered = post_filter(x_mlem_20)
-x_mlem_filtered = post_filter(x_mlem)
-
 # %%
 # save all data to disk such that we can re-use it later (e.g. using a torch data loader)
 
@@ -335,13 +300,10 @@ torch.save(
         "adjoint_ones": adjoint_ones,
         "x_true": x_true,
         "x_att": x_att,
-        "x_mlem": x_mlem,
-        "x_mlem_20": x_mlem_20,
-        "x_mlem_filtered": x_mlem_filtered,
-        "x_mlem_20_filtered": x_mlem_20_filtered,
     },
-    odir / "input_tensors.pt",
+    odir / "data_tensors.pt",
 )
+
 
 with open(odir / "projector_parameters.json", "w", encoding="UTF8") as f:
     json.dump(
@@ -356,113 +318,3 @@ with open(odir / "projector_parameters.json", "w", encoding="UTF8") as f:
         f,
         indent=4,
     )
-
-# %%
-# show a few images
-
-sl0 = img_shape[0] // 2
-sl1 = img_shape[1] // 2
-sl2 = img_shape[2] // 3
-
-
-kws = dict(cmap="Greys", vmin=0, vmax=1.5 * float(torch.max(x_true)), origin="lower")
-
-fig, ax = plt.subplots(3, 3, figsize=(8, 8), layout="constrained")
-ax[0, 0].imshow(x_true[:, :, sl2].cpu().numpy().T, **kws)
-ax[0, 1].imshow(x_true[sl0, :, :].cpu().numpy().T, **kws)
-ax[0, 2].imshow(x_true[:, sl1, :].cpu().numpy().T, **kws)
-ax[1, 0].imshow(x_mlem_20_filtered[:, :, sl2].cpu().numpy().T, **kws)
-ax[1, 1].imshow(x_mlem_20_filtered[sl0, :, :].cpu().numpy().T, **kws)
-ax[1, 2].imshow(x_mlem_20_filtered[:, sl1, :].cpu().numpy().T, **kws)
-ax[2, 0].imshow(x_mlem_filtered[:, :, sl2].cpu().numpy().T, **kws)
-ax[2, 1].imshow(x_mlem_filtered[sl0, :, :].cpu().numpy().T, **kws)
-ax[2, 2].imshow(x_mlem_filtered[:, sl1, :].cpu().numpy().T, **kws)
-
-for axx in ax.ravel():
-    axx.set_xticks([])
-    axx.set_yticks([])
-
-ax[0, 1].set_title("ground truth", fontsize="medium")
-ax[1, 1].set_title("MLEM 20 it. + post-filter", fontsize="medium")
-ax[2, 1].set_title("MLEM 100 it. + post-filter", fontsize="medium")
-
-fig.show()
-
-fig.savefig(odir / "mlem_recons.png", dpi=300)
-
-## %%
-## calculate what is needed for a pytorch negative Poisson logL gradient descent layer
-## note that pet_lin_op in the current form, because of attenuation, is object dependent
-## the same holds for adjoint_ones (should be precomputed and saved to disk)
-#
-## calculate the gradient of the negative Poisson log-likelihood for a random image x
-#
-# batch_size = 1
-#
-# x = torch.rand(
-#    (batch_size, 1) + lm_pet_lin_op.in_shape,
-#    device=dev,
-#    dtype=torch.float32,
-#    requires_grad=True,
-# )
-#
-## affine forward model evaluated at x
-# z_sino = pet_lin_op(x[0,...].squeeze().detach()) + contamination
-#
-# sino_grad = adjoint_ones - pet_lin_op.adjoint(y/z_sino)
-#
-## %%
-## calculate the gradient of the negative Poisson log-likelihood using LM data and projector
-#
-# z_lm = lm_pet_lin_op(x[0,...].squeeze().detach()) + contamination_list
-# lm_grad = adjoint_ones - lm_pet_lin_op.adjoint(1/z_lm)
-#
-## now sino_grad and lm_grad should be numerically very close demonstrating that
-## both approaches are equivalent
-## but for 3D real world low count PET data, the 2nd approach is much faster and
-## more memory efficient
-#
-# assert torch.allclose(lm_grad,sino_grad, atol = 1e-2) # lower limit to the abs tolerance is needed
-#
-## to minimize computation time, we should keep z_sino / z_lm in memory (using the ctx object) after the fwd pass
-## however, if memory is limited, we could also recompute it in the backward pass
-#
-#
-## %%
-## calculate the Hessian(x) applied to another random image w
-## if the forwad pass computes the gradient of the negative Poisson log-likelihood
-## the backward pass needs to compute the Hessian(x) applied to an image w
-#
-## grad_output next to ctx is usually the input passed to the backward pass
-# grad_output = torch.rand(
-#    (batch_size,) + lm_pet_lin_op.in_shape,
-#    device=dev,
-#    dtype=torch.float32,
-#    requires_grad=False,
-# )
-#
-#
-# hess_app_grad_output =  pet_lin_op.adjoint(y * pet_lin_op(grad_output[0,...].squeeze()) / (z_sino**2))
-# hess_app_grad_output_lm = lm_pet_lin_op.adjoint(lm_pet_lin_op(grad_output[0,...].squeeze()) / z_lm**2)
-#
-## again both ways of computing the Hessian to grad_output should be numerically very close
-## the 2nd way should be faster and more memory efficient for real world low count PET data
-#
-# assert torch.allclose(hess_app_grad_output, hess_app_grad_output_lm, atol = 1e-2) # lower limit to the abs tolerance is needed
-#
-## the only thing that is now left is to properly wrap everything in a pytorch autograd layer
-## as done in ../examples/07_torch/01_run_projection_layer.py
-#
-## %%
-## calculate the gradient of the negative Poisson log-likelihood in listmode using a dedicated pytorch autograd layer
-#
-# from utils import LMPoissonLogLDescent
-# lm_grad_layer = LMPoissonLogLDescent.apply
-#
-# lm_grad2 = lm_grad_layer(x, lm_pet_lin_op, contamination_list.unsqueeze(0), adjoint_ones.unsqueeze(0))
-#
-# assert torch.allclose(lm_grad, lm_grad2, atol = 1e-3) # lower limit to the abs tolerance is needed
-#
-# loss = 0.5*(lm_grad2*lm_grad2).sum()
-# loss.backward()
-#
