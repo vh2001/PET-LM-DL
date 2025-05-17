@@ -168,7 +168,7 @@ proj = parallelproj.RegularPolygonPETProjector(
 att_sino = torch.exp(-proj(x_att))
 
 # we artficially lowe the attenuation (sensitivity) sinogram to get by default a lower numbrt of counts
-att_sino *= countlevel * 0.005
+att_sino *= countlevel * 0.015
 
 # %%
 # Complete PET forward model setup
