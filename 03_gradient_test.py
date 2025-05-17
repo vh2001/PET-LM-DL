@@ -2,28 +2,38 @@
 # Unfortunately, this tests takes very long - on data with the usual problem size
 
 import torch
+from torch.utils.data import DataLoader
 
-from data_utils import load_lm_pet_data
+# import multiprocessing as mp
+
+from data_utils import BrainwebLMPETDataset, brainweb_collate_fn
 from utils import LMNegPoissonLogLGradientLayer
 from pathlib import Path
 
-odirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))
+# mp.set_start_method('spawn', force=True)
 
-lm_pet_lin_op1, contamination_list1, adjoint_ones1, x_true1 = load_lm_pet_data(odirs[3])
-lm_pet_lin_op2, contamination_list2, adjoint_ones2, x_true2 = load_lm_pet_data(
-    odirs[11]
+batch_size = 2
+
+train_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))[:5]
+train_dataset = BrainwebLMPETDataset(train_dirs, shuffle=True)
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=batch_size,
+    collate_fn=brainweb_collate_fn,
 )
-
-# stack x_true1 and x_true2
-x = torch.stack((x_true1, x_true2), dim=0).unsqueeze(1)
-x.requires_grad = True
-
-contamination_lists = [contamination_list1, contamination_list2]
-adjoint_ones = [adjoint_ones1, adjoint_ones2]
-lm_pet_lin_ops = [lm_pet_lin_op1, lm_pet_lin_op2]
-diag_preconds = [x_true1 / adjoint_ones1 + 1e-6, x_true2 / adjoint_ones2 + 1e-6]
-
 # %%
+
+batch = next(iter(train_loader))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+x = batch["input"].to(device)
+target = batch["target"].to(device)
+lm_pet_lin_ops = batch["lm_pet_lin_ops"]
+contamination_lists = batch["contamination_lists"]
+adjoint_ones = batch["adjoint_ones"]
+diag_preconds = batch["diag_preconds"]
+
+x.requires_grad = True
 
 lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
 logL_grads = lm_logL_grad_layer(
