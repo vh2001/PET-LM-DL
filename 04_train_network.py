@@ -45,7 +45,7 @@ class LMNet(nn.Module):
 if __name__ == "__main__":
     # input parameters
     seed = 42
-    num_epochs = 100
+    num_epochs = 50
     batch_size = 3
     lr = 3e-4
     num_training_samples = 30
