@@ -1,6 +1,8 @@
 import array_api_compat.torch as torch
-from array_api_compat import device
 import parallelproj
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
@@ -109,3 +111,60 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
                 )
 
             return x, None, None, None, None
+
+
+def to_np(x):
+    return x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x)
+
+
+def plot_batch_input_output_target(
+    input_batch, output_batch, target_batch, output_dir, prefix="val_sample"
+):
+
+    input_batch = to_np(input_batch)
+    output_batch = to_np(output_batch)
+    target_batch = to_np(target_batch)
+    num_samples = input_batch.shape[0]
+
+    for sample_idx in range(num_samples):
+        inp = input_batch[sample_idx, 0]
+        out = output_batch[sample_idx, 0]
+        tgt = target_batch[sample_idx, 0]
+        nx, ny, nz = inp.shape
+
+        vmin, vmax = tgt.min(), 1.2 * tgt.max()
+
+        def get_slices(img):
+            return [
+                img[nx // 2, :, :],  # sagittal
+                img[:, ny // 2, :],  # coronal
+                img[:, :, nz // 2],  # axial
+            ]
+
+        slices = [
+            get_slices(inp),
+            get_slices(out),
+            get_slices(tgt),
+        ]
+        row_titles = ["Input", "Output", "Target"]
+        col_titles = ["Sagittal", "Coronal", "Axial"]
+
+        fig, axes = plt.subplots(3, 3, figsize=(12, 10), layout="constrained")
+        for row in range(3):
+            for col in range(3):
+                axes[row, col].imshow(
+                    slices[row][col].T,
+                    origin="lower",
+                    cmap="Greys",
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                if row == 0:
+                    axes[row, col].set_title(col_titles[col])
+                if col == 0:
+                    axes[row, col].set_ylabel(row_titles[row])
+                axes[row, col].axis("off")
+        fig.suptitle(f"Sample {sample_idx}")
+        fig_path = output_dir / f"{prefix}_{sample_idx:03d}.png"
+        fig.savefig(fig_path, bbox_inches="tight")
+        plt.close(fig)

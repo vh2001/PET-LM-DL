@@ -3,9 +3,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from pathlib import Path
 from datetime import datetime
+from torchmetrics.image import PeakSignalNoiseRatio
 
 from data_utils import BrainwebLMPETDataset, brainweb_collate_fn
-from utils import LMNegPoissonLogLGradientLayer
+from utils import LMNegPoissonLogLGradientLayer, plot_batch_input_output_target
 
 
 # 2. Define a mini 3D conv net block
@@ -58,30 +59,47 @@ class LMNet(nn.Module):
 if __name__ == "__main__":
     # input parameters
     seed = 42
-    num_epochs = 2  # 28
-    batch_size = 6
+    num_epochs = 100
     lr = 3e-4
+    num_blocks = 4  # number of unrolled blocks where each block does a data fidelity gradient step and a network step
+
     num_training_samples = 30
-    num_blocks = 6  # number of unrolled blocks where each block does a data fidelity gradient step and a network step
+    tr_batch_size = 5
+    num_validation_samples = 5
+    val_batch_size = 5
 
     torch.manual_seed(seed)
 
+    # setup the training data loader
     train_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))[
         :num_training_samples
     ]
     train_dataset = BrainwebLMPETDataset(train_dirs, shuffle=True)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=tr_batch_size,
         collate_fn=brainweb_collate_fn,
         drop_last=True,
     )
 
-    # 4. Training setup
+    # setup the validation data loader
+    val_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))[
+        num_training_samples : num_training_samples + num_validation_samples
+    ]
+    val_dataset = BrainwebLMPETDataset(val_dirs, shuffle=False)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=val_batch_size,
+        collate_fn=brainweb_collate_fn,
+    )
+
+    # model setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = LMNet(n_blocks=num_blocks).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
+
+    psnr = PeakSignalNoiseRatio().to(device)
 
     # create a unique output directory for the model checkpoints, use the current datetime string in the directory name
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -115,16 +133,63 @@ if __name__ == "__main__":
             batch_losses[batch_idx] = loss.item()
 
             print(
-                f"Epoch [{epoch}/{num_epochs}] Batch [{batch_idx+1}/{len(train_loader)}] - tr. loss: {loss.item():.3E}",
+                f"Epoch [{epoch:04}/{num_epochs:04}] Batch [{(batch_idx+1):03}/{len(train_loader):03}] - tr. loss: {loss.item():.2E}",
                 end="\r",
             )
 
         loss_avg = batch_losses.mean().item()
         loss_std = batch_losses.std().item()
         print(
-            f"\nEpoch [{epoch}/{num_epochs}] tr. loss: {loss_avg:.3E} +- {loss_std:.3E}"
+            f"\nEpoch [{epoch:04}/{num_epochs:04}] tr.  loss: {loss_avg:.2E} +- {loss_std:.2E}"
         )
 
+        # validation loop
+        model.eval()
+        with torch.no_grad():
+            val_losses = torch.zeros(len(val_loader))
+            val_psnr = torch.zeros(len(val_loader))
+            for batch_idx, batch in enumerate(val_loader):
+                val_x = batch["input"].to(device)
+                val_target = batch["target"].to(device)
+                val_lm_pet_lin_ops = batch["lm_pet_lin_ops"]
+                val_contamination_lists = batch["contamination_lists"]
+                val_adjoint_ones = batch["adjoint_ones"]
+                val_diag_preconds = batch["diag_preconds"]
+
+                val_output = model(
+                    val_x,
+                    val_lm_pet_lin_ops,
+                    val_contamination_lists,
+                    val_adjoint_ones,
+                    val_diag_preconds,
+                )
+                val_loss = criterion(val_output, val_target)
+                val_losses[batch_idx] = val_loss.item()
+                val_psnr[batch_idx] = psnr(val_output, val_target)
+
+                # plot input, output, and target for the current validation batch
+                plot_batch_input_output_target(
+                    val_x,
+                    val_output,
+                    val_target,
+                    model_dir,
+                    prefix=f"val_sample_batch_{batch_idx:03}",
+                )
+
+            val_loss_avg = val_losses.mean().item()
+            val_loss_std = val_losses.std().item()
+
+            val_psnr_avg = val_psnr.mean().item()
+            val_psnr_std = val_psnr.std().item()
+
+            print(
+                f"Epoch [{epoch:04}/{num_epochs:04}] val. loss: {val_loss_avg:.2E} +- {val_loss_std:.2E}"
+            )
+            print(
+                f"Epoch [{epoch:04}/{num_epochs:04}] val. PSNR: {val_psnr_avg:.2E} +- {val_psnr_std:.2E}"
+            )
+
+        # save model checkpoint
         torch.save(
             {
                 "model_state_dict": model.state_dict(),
