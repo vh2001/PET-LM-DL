@@ -168,3 +168,91 @@ def plot_batch_input_output_target(
         fig_path = output_dir / f"{prefix}_{sample_idx:03d}.png"
         fig.savefig(fig_path, bbox_inches="tight")
         plt.close(fig)
+
+
+class SmoothLeakyClippedReLU(torch.nn.Module):
+    def __init__(self, alpha=-0.1):
+        super().__init__()
+        self.alpha = alpha
+        self.a = (1 - alpha) / 2
+        self.b = alpha
+        self.d = (alpha - 1) / 2
+
+    def forward(self, x):
+        a, b, d = self.a, self.b, self.d
+        return torch.where(
+            x <= 0, self.alpha * x, torch.where(x < 1, a * x**2 + b * x, x + d)
+        )
+
+
+# 2. Define a mini 3D conv net block
+class MiniConvNet(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels=1,
+        out_channels=1,
+        num_features=8,
+        num_hidden_layers=1,
+        alpha=-0.1,
+    ):
+        super().__init__()
+        self.non_lin_func = SmoothLeakyClippedReLU(alpha=alpha)
+
+        layers = [
+            torch.nn.Conv3d(in_channels, num_features, kernel_size=3, padding="same")
+        ]
+        for _ in range(num_hidden_layers):
+            layers.append(
+                torch.nn.Conv3d(
+                    num_features, num_features, kernel_size=3, padding="same"
+                )
+            )
+            layers.append(self.non_lin_func)
+        layers.append(
+            torch.nn.Conv3d(num_features, out_channels, kernel_size=3, padding="same")
+        )
+
+        self.conv = torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+# 3. Define the full model
+class LMNet(torch.nn.Module):
+    def __init__(self, conv_nets):
+        super().__init__()
+        self.convs = conv_nets
+        self.num_blocks = len(conv_nets)
+        self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
+
+        self.nonneg_layer = SmoothLeakyClippedReLU(alpha=0.0)
+
+    def forward(
+        self, x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
+    ):
+
+        # PET images can have arbitrary global scales, but we don't want to
+        # normalize before calculating the log-likelihood gradient
+        # instead we calculate scales of all images in the batch and apply
+        # them only before using the neural network
+
+        # as scale we use the mean of the input images
+        # if we are using early stopped OSEM images, the mean is well defined
+        # and stable
+
+        sample_scales = x.mean(dim=(2, 3, 4), keepdim=True)
+
+        for i, conv_net in enumerate(self.convs):
+            # (preconditioned) gradient step on the data fidelity term
+            x = x - self.lm_logL_grad_layer(
+                x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
+            )
+
+            # neueral network step
+            xn = conv_net(x / sample_scales)
+
+            # we have to make sure that the output of the network non negative
+            # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
+            x = self.nonneg_layer(x - xn * sample_scales)
+        return x
