@@ -3,6 +3,7 @@ channels:
   - conda-forge
 dependencies:
   - pytorch
+  - cupy
   - parallelproj
   - matplotlib
   - numpy
