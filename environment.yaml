@@ -1,0 +1,10 @@
+name: pet-lm-dl
+channels:
+  - conda-forge
+dependencies:
+  - pytorch
+  - parallelproj
+  - matplotlib
+  - numpy
+  - nibabel
+  - torchmetrics
