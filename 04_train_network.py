@@ -1,3 +1,5 @@
+import argparse
+import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -58,15 +60,61 @@ class LMNet(nn.Module):
 
 if __name__ == "__main__":
     # input parameters
-    seed = 42
-    num_epochs = 100
-    lr = 3e-4
-    num_blocks = 4  # number of unrolled blocks where each block does a data fidelity gradient step and a network step
+    parser = argparse.ArgumentParser(
+        description="Train LMNet for PET image reconstruction"
+    )
+    parser.add_argument(
+        "--num_epochs", type=int, default=100, help="Number of training epochs"
+    )
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument(
+        "--num_blocks",
+        type=int,
+        default=4,
+        help="Number of MiniConvNet blocks in LMNet",
+    )
+    parser.add_argument(
+        "--num_training_samples",
+        type=int,
+        default=30,
+        help="Number of training samples",
+    )
+    parser.add_argument(
+        "--tr_batch_size", type=int, default=5, help="Training batch size"
+    )
+    parser.add_argument(
+        "--num_validation_samples",
+        type=int,
+        default=5,
+        help="Number of validation samples",
+    )
+    parser.add_argument(
+        "--val_batch_size", type=int, default=5, help="Validation batch size"
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
-    num_training_samples = 30
-    tr_batch_size = 5
-    num_validation_samples = 5
-    val_batch_size = 5
+    args = parser.parse_args()
+
+    seed = args.seed
+    num_epochs = args.num_epochs
+    lr = args.lr
+    num_blocks = args.num_blocks
+    num_training_samples = args.num_training_samples
+    tr_batch_size = args.tr_batch_size
+    num_validation_samples = args.num_validation_samples
+    val_batch_size = args.val_batch_size
+
+    # create a directory for the model checkpoints
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_dir = Path(f"checkpoints/lmnet_run_{run_id}")
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # save args to a json file
+    with open(model_dir / "args.json", "w", encoding="UTF8") as f:
+        f.write(str(args))
+    print(f"Args saved to {model_dir / 'args.json'}")
+
+    # %%
 
     torch.manual_seed(seed)
 
@@ -100,11 +148,6 @@ if __name__ == "__main__":
     criterion = nn.MSELoss()
 
     psnr = PeakSignalNoiseRatio().to(device)
-
-    # create a unique output directory for the model checkpoints, use the current datetime string in the directory name
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_dir = Path(f"checkpoints/lmnet_run_{run_id}")
-    model_dir.mkdir(parents=True, exist_ok=True)
 
     # save model architecture
     with open(model_dir / "lmnet_architecture.txt", "w", encoding="UTF8") as f:
