@@ -3,6 +3,7 @@ checkpoints/*
 data/*
 run.sh
 run.py
+*.pdf
 
 
 # Byte-compiled / optimized / DLL files

@@ -9,8 +9,10 @@ from utils import LMNet, MiniConvNet, plot_batch_input_output_target
 
 # ---- Config ----
 checkpoint_path = "checkpoints/lmnet_run_20250520_001459/lmnet_best.pth"  # <-- set your checkpoint path
-args_path = Path(checkpoint_path).parent / "args.json"
+intermediate_plots = True
+
 # ---- Load Args ----
+args_path = Path(checkpoint_path).parent / "args.json"
 with open(args_path, "r", encoding="UTF8") as f:
     args = json.load(f)
 
@@ -89,7 +91,12 @@ with torch.no_grad():
         diag_preconds = batch["diag_preconds"]
 
         output = model(
-            x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
+            x,
+            lm_pet_lin_ops,
+            contamination_lists,
+            adjoint_ones,
+            diag_preconds,
+            intermediate_plots=intermediate_plots,
         )
         loss = criterion(output, target)
         val_losses.append(loss.item())

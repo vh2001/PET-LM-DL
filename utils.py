@@ -4,6 +4,7 @@ import parallelproj
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
+from pathlib import Path
 
 
 class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
@@ -273,7 +274,13 @@ class LMNet(torch.nn.Module):
         self.use_data_fidelity = use_data_fidelity
 
     def forward(
-        self, x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
+        self,
+        x,
+        lm_pet_lin_ops,
+        contamination_lists,
+        adjoint_ones,
+        diag_preconds,
+        intermediate_plots=False,
     ):
 
         # PET images can have arbitrary global scales, but we don't want to
@@ -290,25 +297,35 @@ class LMNet(torch.nn.Module):
         for i in range(self.num_blocks):
             # (preconditioned) gradient step on the data fidelity term
             if self.use_data_fidelity:
-                x = x - self.lm_logL_grad_layer(
+                xd = x - self.lm_logL_grad_layer(
                     x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
                 )
+            else:
+                xd = x
 
             # neueral network step
             if self.weight_sharing:
                 # use the same network for all blocks
-                xn = self.conv_net_list[0](x / sample_scales)
+                xn = self.conv_net_list[0](xd / sample_scales)
                 # we have to make sure that the output of the network non negative
                 # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
-                x = self.nonneg_layer(
-                    x
+                xo = self.nonneg_layer(
+                    xd
                     - torch.nn.functional.softplus(self.step_sizes_raw[i])
                     * xn
                     * sample_scales
                 )
             else:
-                xn = self.conv_net_list[i](x / sample_scales)
+                xn = self.conv_net_list[i](xd / sample_scales)
                 # we have to make sure that the output of the network non negative
                 # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
-                x = self.nonneg_layer(x - xn * sample_scales)
+                xo = self.nonneg_layer(xd - xn * sample_scales)
+
+            if intermediate_plots:
+                plot_batch_input_output_target(
+                    x, xd, xo, Path("."), prefix=f"block_{i}"
+                )
+
+            x = xo
+
         return x
