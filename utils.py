@@ -225,7 +225,21 @@ class LMNet(torch.nn.Module):
         self,
         conv_nets: torch.nn.ModuleList | torch.nn.Module,
         num_blocks: int | None = None,
+        use_data_fidelity: bool = True,
     ):
+        """_summary_
+
+        Parameters
+        ----------
+        conv_nets : torch.nn.ModuleList | torch.nn.Module
+            (list of) convolutional networks. If a single module is passed,
+            the same network is used for all blocks.
+        num_blocks : int | None, optional
+            number of unrolled blocks. only needed for weight-shared case, by default None
+        use_data_fidelity : bool, optional
+            whether to do a preconditioned data fidelity gradient step
+            before the neural network step in every block, by default True
+        """
         super().__init__()
 
         if isinstance(conv_nets, torch.nn.ModuleList):
@@ -256,6 +270,7 @@ class LMNet(torch.nn.Module):
 
         self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
         self.nonneg_layer = SmoothLeakyClippedReLU(alpha=0.0)
+        self.use_data_fidelity = use_data_fidelity
 
     def forward(
         self, x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
@@ -274,9 +289,10 @@ class LMNet(torch.nn.Module):
 
         for i in range(self.num_blocks):
             # (preconditioned) gradient step on the data fidelity term
-            x = x - self.lm_logL_grad_layer(
-                x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
-            )
+            if self.use_data_fidelity:
+                x = x - self.lm_logL_grad_layer(
+                    x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
+                )
 
             # neueral network step
             if self.weight_sharing:

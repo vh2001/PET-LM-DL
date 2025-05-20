@@ -54,6 +54,11 @@ parser.add_argument(
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed")
 parser.add_argument("--weight_sharing", action="store_true", help="Use weight sharing")
+parser.add_argument(
+    "--skip_data_fidelity",
+    action="store_true",
+    help="skip gradient descent data fidelity steps",
+)
 
 args = parser.parse_args()
 
@@ -71,6 +76,7 @@ tr_batch_size = args.tr_batch_size
 num_validation_samples = args.num_validation_samples
 val_batch_size = args.val_batch_size
 weight_sharing = args.weight_sharing
+skip_data_fidelity: bool = args.skip_data_fidelity
 
 # create a directory for the model checkpoints
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -129,7 +135,9 @@ else:
     )
 
 # setup the LMNet model - defined in utils.py
-model = LMNet(conv_nets=conv_nets, num_blocks=num_blocks).to(device)
+model = LMNet(
+    conv_nets=conv_nets, num_blocks=num_blocks, use_data_fidelity=not skip_data_fidelity
+).to(device)
 
 # setup the optimizer and loss function
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
