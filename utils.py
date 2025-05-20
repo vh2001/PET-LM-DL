@@ -221,12 +221,40 @@ class MiniConvNet(torch.nn.Module):
 
 # 3. Define the full model
 class LMNet(torch.nn.Module):
-    def __init__(self, conv_nets):
+    def __init__(
+        self,
+        conv_nets: torch.nn.ModuleList | torch.nn.Module,
+        num_blocks: int | None = None,
+    ):
         super().__init__()
-        self.convs = conv_nets
-        self.num_blocks = len(conv_nets)
-        self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
 
+        if isinstance(conv_nets, torch.nn.ModuleList):
+            self.weight_sharing = False
+            self.conv_net_list = conv_nets
+            self.num_blocks: int = len(conv_nets)
+            # dummy init for step sizes - not used in forward pass
+            self.step_sizes_raw: torch.Tensor = torch.ones(self.num_blocks)
+
+        elif isinstance(conv_nets, torch.nn.Module):
+            self.weight_sharing = True
+            self.conv_net_list = torch.nn.ModuleList([conv_nets])
+
+            if num_blocks is None:
+                raise ValueError(
+                    "num_blocks must be specified if conv_nets is a single module"
+                )
+
+            self.num_blocks: int = num_blocks
+
+            # if weights are shared, it is better to use trainable step sizes (by default)
+            self.trainable_step_sizes = True
+            self.step_sizes_raw: torch.nn.Parameter = torch.nn.Parameter(
+                torch.ones(self.num_blocks)
+            )
+        else:
+            raise ValueError("conv_nets must be a list of modules or a single module")
+
+        self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
         self.nonneg_layer = SmoothLeakyClippedReLU(alpha=0.0)
 
     def forward(
@@ -244,16 +272,27 @@ class LMNet(torch.nn.Module):
 
         sample_scales = x.mean(dim=(2, 3, 4), keepdim=True)
 
-        for i, conv_net in enumerate(self.convs):
+        for i in range(self.num_blocks):
             # (preconditioned) gradient step on the data fidelity term
             x = x - self.lm_logL_grad_layer(
                 x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
             )
 
             # neueral network step
-            xn = conv_net(x / sample_scales)
-
-            # we have to make sure that the output of the network non negative
-            # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
-            x = self.nonneg_layer(x - xn * sample_scales)
+            if self.weight_sharing:
+                # use the same network for all blocks
+                xn = self.conv_net_list[0](x / sample_scales)
+                # we have to make sure that the output of the network non negative
+                # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
+                x = self.nonneg_layer(
+                    x
+                    - torch.nn.functional.softplus(self.step_sizes_raw[i])
+                    * xn
+                    * sample_scales
+                )
+            else:
+                xn = self.conv_net_list[i](x / sample_scales)
+                # we have to make sure that the output of the network non negative
+                # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
+                x = self.nonneg_layer(x - xn * sample_scales)
         return x

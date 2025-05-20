@@ -2,6 +2,7 @@
 checkpoints/*
 data/*
 run.sh
+run.py
 
 
 # Byte-compiled / optimized / DLL files

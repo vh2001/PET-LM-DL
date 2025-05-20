@@ -53,6 +53,7 @@ parser.add_argument(
     "--val_batch_size", type=int, default=5, help="Validation batch size"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed")
+parser.add_argument("--weight_sharing", action="store_true", help="Use weight sharing")
 
 args = parser.parse_args()
 
@@ -69,6 +70,7 @@ num_training_samples = args.num_training_samples
 tr_batch_size = args.tr_batch_size
 num_validation_samples = args.num_validation_samples
 val_batch_size = args.val_batch_size
+weight_sharing = args.weight_sharing
 
 # create a directory for the model checkpoints
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -112,16 +114,22 @@ val_loader = DataLoader(
 # model setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# setup a list of mini conv nets- defined in utils.py
-conv_nets = torch.nn.ModuleList(
-    [
-        MiniConvNet(num_features=num_features, num_hidden_layers=num_hidden_layers)
-        for _ in range(num_blocks)
-    ]
-)
+if weight_sharing:
+    # if weight sharing is used, create a single MiniConvNet and use it for all blocks
+    conv_nets = MiniConvNet(
+        num_features=num_features, num_hidden_layers=num_hidden_layers
+    )
+else:
+    # setup a list of mini conv nets - defined in utils.py
+    conv_nets = torch.nn.ModuleList(
+        [
+            MiniConvNet(num_features=num_features, num_hidden_layers=num_hidden_layers)
+            for _ in range(num_blocks)
+        ]
+    )
 
 # setup the LMNet model - defined in utils.py
-model = LMNet(conv_nets=conv_nets).to(device)
+model = LMNet(conv_nets=conv_nets, num_blocks=num_blocks).to(device)
 
 # setup the optimizer and loss function
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
