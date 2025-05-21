@@ -153,9 +153,10 @@ def plot_batch_input_output_target(
             col_titles = ["Sagittal", "Coronal", "Axial"]
 
             fig, axes = plt.subplots(3, 3, figsize=(12, 10), layout="constrained")
+            im = None
             for row in range(3):
                 for col in range(3):
-                    axes[row, col].imshow(
+                    im = axes[row, col].imshow(
                         slices[row][col].T,
                         origin="lower",
                         cmap="Greys",
@@ -167,6 +168,76 @@ def plot_batch_input_output_target(
                     if col == 0:
                         axes[row, col].set_ylabel(row_titles[row])
                     axes[row, col].axis("off")
+            # Add a single colorbar to the right of the grid
+            fig.colorbar(im, ax=axes, orientation="vertical", fraction=0.015, pad=0.04)
+            fig.suptitle(f"Sample {sample_idx}")
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+
+def plot_batch_intermediate_images(
+    x_batch, xd_batch, xo_batch, output_dir, prefix="intermediate", vmax=None
+):
+    """
+    Plots central slices for x, xd, and xo for each sample in the batch.
+    Each sample gets a 3x3 grid:
+      - Row 1: x (sagittal, coronal, axial)
+      - Row 2: xd (sagittal, coronal, axial)
+      - Row 3: xo (sagittal, coronal, axial)
+    vmax can be set, otherwise defaults to 1.2*max(xd).
+    """
+    x_batch = to_np(x_batch)
+    xd_batch = to_np(xd_batch)
+    xo_batch = to_np(xo_batch)
+    num_samples = x_batch.shape[0]
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    pdf_path = output_dir / f"{prefix}.pdf"
+    with PdfPages(pdf_path) as pdf:
+        for sample_idx in range(num_samples):
+            x = x_batch[sample_idx, 0]
+            xd = xd_batch[sample_idx, 0]
+            xo = xo_batch[sample_idx, 0]
+            nx, ny, nz = x.shape
+
+            vmin = 0
+            vmax_plot = vmax if vmax is not None else 1.2 * xd.max()
+
+            def get_slices(img):
+                return [
+                    img[nx // 2, :, :],  # sagittal
+                    img[:, ny // 2, :],  # coronal
+                    img[:, :, nz // 2],  # axial
+                ]
+
+            slices = [
+                get_slices(x),
+                get_slices(xd),
+                get_slices(xo),
+            ]
+            row_titles = ["x (input)", "xd (after df step)", "xo (output)"]
+            col_titles = ["Sagittal", "Coronal", "Axial"]
+
+            fig, axes = plt.subplots(3, 3, figsize=(12, 10), layout="constrained")
+            im = None
+            for row in range(3):
+                for col in range(3):
+                    im = axes[row, col].imshow(
+                        slices[row][col].T,
+                        origin="lower",
+                        cmap="Greys",
+                        vmin=vmin,
+                        vmax=vmax_plot,
+                    )
+                    if row == 0:
+                        axes[row, col].set_title(col_titles[col])
+                    if col == 0:
+                        axes[row, col].set_ylabel(row_titles[row])
+                    axes[row, col].axis("off")
+            # Add a single colorbar to the right of the grid
+            fig.colorbar(im, ax=axes, orientation="vertical", fraction=0.015, pad=0.04)
             fig.suptitle(f"Sample {sample_idx}")
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
@@ -309,6 +380,7 @@ class LMNet(torch.nn.Module):
                 xn = self.conv_net_list[0](xd / sample_scales)
                 # we have to make sure that the output of the network non negative
                 # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
+                # the softplus around the step size is needed to make sure that the step size is positive
                 xo = self.nonneg_layer(
                     xd
                     - torch.nn.functional.softplus(self.step_sizes_raw[i])
@@ -322,7 +394,7 @@ class LMNet(torch.nn.Module):
                 xo = self.nonneg_layer(xd - xn * sample_scales)
 
             if intermediate_plots:
-                plot_batch_input_output_target(
+                plot_batch_intermediate_images(
                     x, xd, xo, Path("."), prefix=f"block_{i}"
                 )
 

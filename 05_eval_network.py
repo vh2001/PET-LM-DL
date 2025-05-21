@@ -6,10 +6,25 @@ from torchmetrics.image import PeakSignalNoiseRatio
 
 from data_utils import BrainwebLMPETDataset, brainweb_collate_fn
 from utils import LMNet, MiniConvNet, plot_batch_input_output_target
+import argparse
 
 # ---- Config ----
-checkpoint_path = "checkpoints/lmnet_run_20250520_001459/lmnet_best.pth"  # <-- set your checkpoint path
-intermediate_plots = True
+parser = argparse.ArgumentParser(description="Evaluate LMNet model on validation data.")
+parser.add_argument(
+    "--checkpoint_path",
+    type=str,
+    required=True,
+    help="Path to the model checkpoint (.pth file).",
+)
+parser.add_argument(
+    "--intermediate_plots",
+    action="store_true",
+    help="Whether to generate intermediate plots during evaluation.",
+)
+args_cli = parser.parse_args()
+
+checkpoint_path = args_cli.checkpoint_path
+intermediate_plots = args_cli.intermediate_plots
 
 # ---- Load Args ----
 args_path = Path(checkpoint_path).parent / "args.json"
