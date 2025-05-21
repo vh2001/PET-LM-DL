@@ -144,32 +144,57 @@ def plot_batch_input_output_target(
                     img[:, :, nz // 2],  # axial
                 ]
 
+            diff = out - tgt
+            diff_vmax = 0.3 * tgt.max()
+            diff_vmin = -0.3 * tgt.max()
+
             slices = [
                 get_slices(inp),
                 get_slices(out),
                 get_slices(tgt),
+                get_slices(diff),
             ]
-            row_titles = ["Input", "Output", "Target"]
+            row_titles = ["Input", "Output", "Target", "Output - Target"]
             col_titles = ["Sagittal", "Coronal", "Axial"]
 
-            fig, axes = plt.subplots(3, 3, figsize=(12, 10), layout="constrained")
-            im = None
-            for row in range(3):
+            fig, axes = plt.subplots(4, 3, figsize=(12, 13), layout="constrained")
+            im_greys = None
+            im_diff = None
+            for row in range(4):
                 for col in range(3):
-                    im = axes[row, col].imshow(
-                        slices[row][col].T,
-                        origin="lower",
-                        cmap="Greys",
-                        vmin=vmin,
-                        vmax=vmax,
-                    )
+                    if row < 3:
+                        im_greys = axes[row, col].imshow(
+                            slices[row][col].T,
+                            origin="lower",
+                            cmap="Greys",
+                            vmin=vmin,
+                            vmax=vmax,
+                        )
+                    else:
+                        im_diff = axes[row, col].imshow(
+                            slices[row][col].T,
+                            origin="lower",
+                            cmap="seismic",
+                            vmin=diff_vmin,
+                            vmax=diff_vmax,
+                        )
                     if row == 0:
                         axes[row, col].set_title(col_titles[col])
                     if col == 0:
                         axes[row, col].set_ylabel(row_titles[row])
                     axes[row, col].axis("off")
-            # Add a single colorbar to the right of the grid
-            fig.colorbar(im, ax=axes, orientation="vertical", fraction=0.015, pad=0.04)
+            # Add a colorbar for the top 3 rows (Greys)
+            fig.colorbar(
+                im_greys,
+                ax=axes[:3, :],
+                orientation="vertical",
+                fraction=0.025,
+                pad=0.04,
+            )
+            # Add a colorbar for the last row (difference)
+            fig.colorbar(
+                im_diff, ax=axes[3, :], orientation="vertical", fraction=0.025, pad=0.04
+            )
             fig.suptitle(f"Sample {sample_idx}")
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
