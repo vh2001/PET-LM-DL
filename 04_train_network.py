@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--num_features",
     type=int,
-    default=8,
+    default=16,
     help="Number of features in each MiniConvNet (hidden) layer",
 )
 parser.add_argument(
