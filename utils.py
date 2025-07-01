@@ -323,6 +323,7 @@ class LMNet(torch.nn.Module):
         conv_nets: torch.nn.ModuleList | torch.nn.Module,
         num_blocks: int | None = None,
         use_data_fidelity: bool = True,
+        renormalize: bool = False,
     ):
         """_summary_
 
@@ -336,6 +337,9 @@ class LMNet(torch.nn.Module):
         use_data_fidelity : bool, optional
             whether to do a preconditioned data fidelity gradient step
             before the neural network step in every block, by default True
+        renormalize : bool, optional
+            whether to renormalize the output after every neural network step,
+            ensuring that the mean of the images is kept constant.
         """
         super().__init__()
 
@@ -368,6 +372,7 @@ class LMNet(torch.nn.Module):
         self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
         self.nonneg_layer = SmoothLeakyClippedReLU(alpha=0.0)
         self.use_data_fidelity = use_data_fidelity
+        self.renormalize = renormalize
 
     def forward(
         self,
@@ -417,6 +422,11 @@ class LMNet(torch.nn.Module):
                 # we have to make sure that the output of the network non negative
                 # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
                 xo = self.nonneg_layer(xd - xn * sample_scales)
+
+            if self.renormalize:
+                output_scales = xo.mean(dim=(2, 3, 4), keepdim=True)
+                # renormalize the output to have the same mean as the input
+                xo = xo * (sample_scales / output_scales)
 
             if intermediate_plots:
                 plot_batch_intermediate_images(
