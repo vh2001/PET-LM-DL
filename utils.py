@@ -3,6 +3,7 @@ import parallelproj
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch.nn.functional as F
 from matplotlib.backends.backend_pdf import PdfPages
 from pathlib import Path
 
@@ -283,6 +284,33 @@ class SmoothLeakyClippedReLU(torch.nn.Module):
         )
 
 
+class ParamSmoothLeakyReLU(torch.nn.Module):
+    def __init__(self, alpha: float, beta: float):
+        """
+        f(x) = alpha*x + (1-alpha) * Softplus(beta*x) / beta
+
+        - alpha controls the negative slope, reasoabke value 0.02
+        - beta > 0 controls how quickly f(x) -> x for x > 0.
+            small beta: slow, gentle transition
+            large beta: sharp, nearly ReLU-like transition at x≈0
+            reasonable value 4.0
+
+        Requires: 0 <= alpha < 1, beta > 0.
+        """
+        super().__init__()
+        if not (0.0 <= alpha < 1.0):
+            raise ValueError(f"alpha must be in [0,1), got {alpha}")
+        if beta <= 0:
+            raise ValueError(f"beta must be positive, got {beta}")
+        self.alpha = alpha
+        self.beta = beta
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # scaled softplus: (1/beta)*log(1 + exp(beta*x))
+        sp = F.softplus(self.beta * x) / self.beta
+        return self.alpha * x + (1.0 - self.alpha) * sp
+
+
 # 2. Define a mini 3D conv net block
 class MiniConvNet(torch.nn.Module):
     def __init__(
@@ -291,11 +319,12 @@ class MiniConvNet(torch.nn.Module):
         out_channels=1,
         num_features=8,
         num_hidden_layers=1,
-        alpha=0.02,  # old default was -0.01, but small positive values is better
+        alpha=0.02,
+        beta=4.0,
     ):
         super().__init__()
-        self.non_lin_func = SmoothLeakyClippedReLU(alpha=alpha)
-        print(self.non_lin_func.alpha)
+        self.non_lin_func = ParamSmoothLeakyReLU(alpha=alpha, beta=beta)
+        print(self.non_lin_func.alpha, self.non_lin_func.beta)
 
         layers = [
             torch.nn.Conv3d(in_channels, num_features, kernel_size=3, padding="same")
@@ -371,7 +400,7 @@ class LMNet(torch.nn.Module):
             raise ValueError("conv_nets must be a list of modules or a single module")
 
         self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
-        self.nonneg_layer = SmoothLeakyClippedReLU(alpha=0.0)
+        self.nonneg_layer = ParamSmoothLeakyReLU(alpha=0.0, beta=12.0)
         self.use_data_fidelity = use_data_fidelity
         self.renormalize = renormalize
 
@@ -397,6 +426,7 @@ class LMNet(torch.nn.Module):
         sample_scales = x.mean(dim=(2, 3, 4), keepdim=True)
 
         for i in range(self.num_blocks):
+
             # (preconditioned) gradient step on the data fidelity term
             if self.use_data_fidelity:
                 xd = x - self.lm_logL_grad_layer(

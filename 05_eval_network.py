@@ -38,10 +38,8 @@ num_features = args["num_features"]
 num_hidden_layers = args.get("num_hidden_layers", 1)
 weight_sharing = args.get("weight_sharing", False)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-alpha = args.get(
-    "alpha", -0.1
-)  # the old default value was -0.01 (not present in args.json)
-# a small positive value makes more sense for alpha (slope of non-lin for neg. values)
+alpha = args.get("alpha")
+beta = args.get("beta")
 
 # ---- Setup Validation DataLoader ----
 val_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))[
