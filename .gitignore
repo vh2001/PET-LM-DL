@@ -1,9 +1,11 @@
 # user defines
 checkpoints/*
+promising_checkpoints/*
 data/*
 run.sh
 run.py
 *.pdf
+zz_notes.txt
 
 
 # Byte-compiled / optimized / DLL files
