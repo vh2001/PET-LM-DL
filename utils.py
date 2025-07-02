@@ -418,10 +418,10 @@ class LMNet(torch.nn.Module):
                     * sample_scales
                 )
             else:
-                xn = self.conv_net_list[i](xd / sample_scales)
+                xn = sample_scales * self.conv_net_list[i](xd / sample_scales)
                 # we have to make sure that the output of the network non negative
                 # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
-                xo = self.nonneg_layer(xd - xn * sample_scales)
+                xo = self.nonneg_layer(xd - xn)
 
             if self.renormalize:
                 output_scales = xo.mean(dim=(2, 3, 4), keepdim=True)
