@@ -59,6 +59,9 @@ parser.add_argument(
     action="store_true",
     help="skip gradient descent data fidelity steps",
 )
+parser.add_argument(
+    "--alpha", type=float, default=0.02, help="slope parameter for smooth leaky ReLU"
+)
 
 args = parser.parse_args()
 
@@ -77,6 +80,7 @@ num_validation_samples = args.num_validation_samples
 val_batch_size = args.val_batch_size
 weight_sharing = args.weight_sharing
 skip_data_fidelity: bool = args.skip_data_fidelity
+alpha: float = args.alpha
 
 # create a directory for the model checkpoints
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -123,13 +127,17 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if weight_sharing:
     # if weight sharing is used, create a single MiniConvNet and use it for all blocks
     conv_nets = MiniConvNet(
-        num_features=num_features, num_hidden_layers=num_hidden_layers
+        num_features=num_features, num_hidden_layers=num_hidden_layers, alpha=alpha
     )
 else:
     # setup a list of mini conv nets - defined in utils.py
     conv_nets = torch.nn.ModuleList(
         [
-            MiniConvNet(num_features=num_features, num_hidden_layers=num_hidden_layers)
+            MiniConvNet(
+                num_features=num_features,
+                num_hidden_layers=num_hidden_layers,
+                alpha=alpha,
+            )
             for _ in range(num_blocks)
         ]
     )

@@ -291,10 +291,11 @@ class MiniConvNet(torch.nn.Module):
         out_channels=1,
         num_features=8,
         num_hidden_layers=1,
-        alpha=-0.1,
+        alpha=0.02,  # old default was -0.01, but small positive values is better
     ):
         super().__init__()
         self.non_lin_func = SmoothLeakyClippedReLU(alpha=alpha)
+        print(self.non_lin_func.alpha)
 
         layers = [
             torch.nn.Conv3d(in_channels, num_features, kernel_size=3, padding="same")

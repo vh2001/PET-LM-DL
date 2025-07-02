@@ -38,6 +38,10 @@ num_features = args["num_features"]
 num_hidden_layers = args.get("num_hidden_layers", 1)
 weight_sharing = args.get("weight_sharing", False)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+alpha = args.get(
+    "alpha", -0.1
+)  # the old default value was -0.01 (not present in args.json)
+# a small positive value makes more sense for alpha (slope of non-lin for neg. values)
 
 # ---- Setup Validation DataLoader ----
 val_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))[
@@ -56,12 +60,16 @@ val_loader = DataLoader(
 # ---- Rebuild Model ----
 if weight_sharing:
     conv_nets = MiniConvNet(
-        num_features=num_features, num_hidden_layers=num_hidden_layers
+        num_features=num_features, num_hidden_layers=num_hidden_layers, alpha=alpha
     )
 else:
     conv_nets = torch.nn.ModuleList(
         [
-            MiniConvNet(num_features=num_features, num_hidden_layers=num_hidden_layers)
+            MiniConvNet(
+                num_features=num_features,
+                num_hidden_layers=num_hidden_layers,
+                alpha=alpha,
+            )
             for _ in range(num_blocks)
         ]
     )
@@ -72,19 +80,19 @@ model = LMNet(conv_nets=conv_nets, num_blocks=num_blocks)
 state = torch.load(checkpoint_path, map_location=device)
 state_dict = state["model_state_dict"]
 
-######## HACK NEEDED BECAUSE VARIABLE IN LMNET WAS RENAMED
-# Remap keys from 'convs.' to 'conv_net_list.'
-new_state_dict = {}
-for k, v in state_dict.items():
-    if k.startswith("convs."):
-        new_k = k.replace("convs.", "conv_net_list.", 1)
-    else:
-        new_k = k
-    new_state_dict[new_k] = v
-########
+######### HACK NEEDED BECAUSE VARIABLE IN LMNET WAS RENAMED
+## Remap keys from 'convs.' to 'conv_net_list.'
+# new_state_dict = {}
+# for k, v in state_dict.items():
+#    if k.startswith("convs."):
+#        new_k = k.replace("convs.", "conv_net_list.", 1)
+#    else:
+#        new_k = k
+#    new_state_dict[new_k] = v
+#########
 
 
-model.load_state_dict(new_state_dict)
+model.load_state_dict(state_dict)
 model = model.to(device)
 model.eval()
 
