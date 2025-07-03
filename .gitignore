@@ -5,6 +5,7 @@ data/*
 run.sh
 run.py
 *.pdf
+*.png
 zz_notes.txt
 
 

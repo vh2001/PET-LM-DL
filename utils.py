@@ -201,72 +201,54 @@ def plot_batch_input_output_target(
             plt.close(fig)
 
 
-def plot_batch_intermediate_images(
-    x_batch, xd_batch, xo_batch, output_dir, prefix="intermediate", vmax=None
-):
-    """
-    Plots central slices for x, xd, and xo for each sample in the batch.
-    Each sample gets a 3x3 grid:
-      - Row 1: x (sagittal, coronal, axial)
-      - Row 2: xd (sagittal, coronal, axial)
-      - Row 3: xo (sagittal, coronal, axial)
-    vmax can be set, otherwise defaults to 1.2*max(xd).
-    """
-    x_batch = to_np(x_batch)
-    xd_batch = to_np(xd_batch)
-    xo_batch = to_np(xo_batch)
-    num_samples = x_batch.shape[0]
+def plot_batch_intermediate_images(x_intermed):
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    num_samples = x_intermed.shape[1]
+    num_intermed_imgs = x_intermed.shape[0]
+    nx = x_intermed.shape[2]
+    ny = x_intermed.shape[3]
+    nz = x_intermed.shape[4]
 
-    pdf_path = output_dir / f"{prefix}.pdf"
-    with PdfPages(pdf_path) as pdf:
-        for sample_idx in range(num_samples):
-            x = x_batch[sample_idx, 0]
-            xd = xd_batch[sample_idx, 0]
-            xo = xo_batch[sample_idx, 0]
-            nx, ny, nz = x.shape
+    for sample_idx in range(num_samples):
+        fig, ax = plt.subplots(
+            3,
+            num_intermed_imgs,
+            figsize=(2 * num_intermed_imgs, 2 * 3),
+            layout="constrained",
+        )
 
-            vmin = 0
-            vmax_plot = vmax if vmax is not None else 1.2 * xd.max()
+        for i in range(num_intermed_imgs):
+            vol = x_intermed[i, sample_idx, ...]
+            vmin = vol.min()
+            vmax = vol.max()
+            im0 = ax[0, i].imshow(
+                vol[nx // 2, :, :].T, origin="lower", cmap="Greys", vmin=vmin, vmax=vmax
+            )
+            im1 = ax[1, i].imshow(
+                vol[ny // 2, :, :].T, origin="lower", cmap="Greys", vmin=vmin, vmax=vmax
+            )
+            im2 = ax[2, i].imshow(
+                vol[:, :, nz // 2].T, origin="lower", cmap="Greys", vmin=vmin, vmax=vmax
+            )
+            fig.colorbar(
+                im2,
+                ax=ax[2, i],
+                orientation="horizontal",
+                location="bottom",
+                fraction=0.04,
+                pad=0.01,
+            )
 
-            def get_slices(img):
-                return [
-                    img[nx // 2, :, :],  # sagittal
-                    img[:, ny // 2, :],  # coronal
-                    img[:, :, nz // 2],  # axial
-                ]
+            if i % 2 == 0:
+                ax[0, i].set_title(f"x_d {i // 2 + 1}", fontsize="medium")
+            else:
+                ax[0, i].set_title(f"x_0 {i // 2 + 1}", fontsize="medium")
 
-            slices = [
-                get_slices(x),
-                get_slices(xd),
-                get_slices(xo),
-            ]
-            row_titles = ["x (input)", "xd (after df step)", "xo (output)"]
-            col_titles = ["Sagittal", "Coronal", "Axial"]
+        for axx in ax.ravel():
+            axx.set_xticks([])
+            axx.set_yticks([])
 
-            fig, axes = plt.subplots(3, 3, figsize=(12, 10), layout="constrained")
-            im = None
-            for row in range(3):
-                for col in range(3):
-                    im = axes[row, col].imshow(
-                        slices[row][col].T,
-                        origin="lower",
-                        cmap="Greys",
-                        vmin=vmin,
-                        vmax=vmax_plot,
-                    )
-                    if row == 0:
-                        axes[row, col].set_title(col_titles[col])
-                    if col == 0:
-                        axes[row, col].set_ylabel(row_titles[row])
-                    axes[row, col].axis("off")
-            # Add a single colorbar to the right of the grid
-            fig.colorbar(im, ax=axes, orientation="vertical", fraction=0.015, pad=0.04)
-            fig.suptitle(f"Sample {sample_idx}")
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
+        fig.savefig(f"intermediate_images_sample_{sample_idx}.png")
 
 
 class SmoothLeakyClippedReLU(torch.nn.Module):
@@ -353,7 +335,6 @@ class LMNet(torch.nn.Module):
         conv_nets: torch.nn.ModuleList | torch.nn.Module,
         num_blocks: int | None = None,
         use_data_fidelity: bool = True,
-        renormalize: bool = False,
     ):
         """_summary_
 
@@ -367,9 +348,6 @@ class LMNet(torch.nn.Module):
         use_data_fidelity : bool, optional
             whether to do a preconditioned data fidelity gradient step
             before the neural network step in every block, by default True
-        renormalize : bool, optional
-            whether to renormalize the output after every neural network step,
-            ensuring that the mean of the images is kept constant.
         """
         super().__init__()
 
@@ -402,7 +380,6 @@ class LMNet(torch.nn.Module):
         self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
         self.nonneg_layer = ParamSmoothLeakyReLU(alpha=0.0, beta=12.0)
         self.use_data_fidelity = use_data_fidelity
-        self.renormalize = renormalize
 
     def forward(
         self,
@@ -424,6 +401,8 @@ class LMNet(torch.nn.Module):
         # and stable
 
         sample_scales = x.mean(dim=(2, 3, 4), keepdim=True)
+
+        x_intermed = []
 
         for i in range(self.num_blocks):
 
@@ -454,16 +433,13 @@ class LMNet(torch.nn.Module):
                 # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
                 xo = self.nonneg_layer(xd - xn)
 
-            if self.renormalize:
-                output_scales = xo.mean(dim=(2, 3, 4), keepdim=True)
-                # renormalize the output to have the same mean as the input
-                xo = xo * (sample_scales / output_scales)
-
             if intermediate_plots:
-                plot_batch_intermediate_images(
-                    x, xd, xo, Path("."), prefix=f"block_{i}"
-                )
+                x_intermed.append(to_np(xd))
+                x_intermed.append(to_np(xo))
 
             x = xo
+
+        if intermediate_plots:
+            plot_batch_intermediate_images(np.array(x_intermed).squeeze())
 
         return x
