@@ -242,7 +242,7 @@ def plot_batch_intermediate_images(x_intermed):
             if i % 2 == 0:
                 ax[0, i].set_title(f"x_d {i // 2 + 1}", fontsize="medium")
             else:
-                ax[0, i].set_title(f"x_0 {i // 2 + 1}", fontsize="medium")
+                ax[0, i].set_title(f"x_o {i // 2 + 1}", fontsize="medium")
 
         for axx in ax.ravel():
             axx.set_xticks([])
