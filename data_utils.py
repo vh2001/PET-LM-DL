@@ -107,7 +107,7 @@ def brainweb_collate_fn(batch):
         "contamination_lists": [item["contamination_list"] for item in batch],
         "adjoint_ones": [item["adjoint_ones"] for item in batch],
         "diag_preconds": [
-            item["target"] / item["adjoint_ones"] + 1e-6 for item in batch
+            item["input"] / item["adjoint_ones"] + 1e-6 for item in batch
         ],
     }
 
