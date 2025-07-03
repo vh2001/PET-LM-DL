@@ -173,6 +173,8 @@ with open(model_dir / "lmnet_architecture.txt", "w", encoding="UTF8") as f:
 print(f"Model architecture saved to {model_dir / 'lmnet_architecture.txt'}")
 
 val_psnr = torch.zeros(num_epochs)
+val_loss_avg = torch.zeros(num_epochs)
+train_loss_avg = torch.zeros(num_epochs)
 
 # training loop
 model.train()
@@ -201,6 +203,7 @@ for epoch in range(1, num_epochs + 1):
         )
 
     loss_avg = batch_losses.mean().item()
+    train_loss_avg[epoch - 1] = loss_avg
     loss_std = batch_losses.std().item()
     print(
         f"\nEpoch [{epoch:04}/{num_epochs:04}] tr.  loss: {loss_avg:.2E} +- {loss_std:.2E}"
@@ -239,10 +242,12 @@ for epoch in range(1, num_epochs + 1):
                 prefix=f"val_sample_batch_{batch_idx:03}",
             )
 
-        val_loss_avg = val_losses.mean().item()
+        val_loss_avg[epoch - 1] = val_losses.mean().item()
         val_psnr[epoch - 1] = batch_psnr.mean().item()
 
-        print(f"Epoch [{epoch:04}/{num_epochs:04}] val. loss: {val_loss_avg:.2E}")
+        print(
+            f"Epoch [{epoch:04}/{num_epochs:04}] val. loss: {val_loss_avg[epoch - 1]:.2E}"
+        )
         print(
             f"Epoch [{epoch:04}/{num_epochs:04}] val. PSNR: {val_psnr[epoch - 1]:.2E}"
         )
@@ -271,12 +276,18 @@ for epoch in range(1, num_epochs + 1):
         print(f"Best model symlinked to {best_model_path} -> {epoch_model_path.name}")
 
     # plot the validation PSNR
-    fig, ax = plt.subplots(layout="constrained", figsize=(6, 3))
-    ax.plot(
-        range(1, epoch + 1), val_psnr[:epoch].cpu().numpy(), label="Validation PSNR"
-    )
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("validation PSNR (dB)")
-    ax.grid(ls=":")
-    fig.savefig(model_dir / "val_psnr.pdf")
+    fig, ax = plt.subplots(3, 1, layout="constrained", figsize=(6, 6), sharex=True)
+    epochs = range(1, epoch + 1)
+    ax[0].semilogy(epochs, train_loss_avg[:epoch].cpu().numpy())
+    ax[1].semilogy(epochs, val_loss_avg[:epoch].cpu().numpy())
+    ax[2].plot(epochs, val_psnr[:epoch].cpu().numpy())
+
+    ax[0].set_ylabel("training loss")
+    ax[1].set_ylabel("validation loss")
+    ax[2].set_ylabel("validation PSNR (dB)")
+
+    ax[2].set_xlabel("Epoch")
+    for axx in ax.ravel():
+        axx.grid(ls=":")
+    fig.savefig(model_dir / "current_metrics.pdf")
     plt.close(fig)
