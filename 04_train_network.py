@@ -71,6 +71,11 @@ parser.add_argument(
     default=4.0,
     help="curvature parameter for smooth non-linearity (at 0) for MiniConvNets",
 )
+parser.add_argument(
+    "--print_gradient_norms",
+    action="store_true",
+    help="Print gradient norms during training (useful for debugging)",
+)
 
 args = parser.parse_args()
 
@@ -91,6 +96,7 @@ weight_sharing = args.weight_sharing
 skip_data_fidelity: bool = args.skip_data_fidelity
 alpha: float = args.alpha
 beta: float = args.beta
+print_gradient_norms: bool = args.print_gradient_norms
 
 # create a directory for the model checkpoints
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -176,6 +182,18 @@ val_psnr = torch.zeros(num_epochs)
 val_loss_avg = torch.zeros(num_epochs)
 train_loss_avg = torch.zeros(num_epochs)
 
+
+# better initialization of the weights of Conv3d layers in the conv net
+def init_weights_he(m):
+    if isinstance(m, torch.nn.Conv3d):
+        # for ReLU activations, use nonlinearity='relu'
+        torch.nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
+
+
+model.apply(init_weights_he)
+
 # training loop
 model.train()
 for epoch in range(1, num_epochs + 1):
@@ -194,6 +212,17 @@ for epoch in range(1, num_epochs + 1):
         )
         loss = criterion(output, target)
         loss.backward()
+
+        # print gradient norms if requested - useful to see if gradients are exploding or vanishing
+        if print_gradient_norms:
+            # print gradient norms
+            for name, param in model.named_parameters():
+                if param.grad is None:
+                    print(f"{name:40s} | grad is None")
+                else:
+                    print(f"{name:40s} | grad norm: {param.grad.norm():.6f}")
+            print()
+
         optimizer.step()
         batch_losses[batch_idx] = loss.item()
 
@@ -276,17 +305,23 @@ for epoch in range(1, num_epochs + 1):
         print(f"Best model symlinked to {best_model_path} -> {epoch_model_path.name}")
 
     # plot the validation PSNR
-    fig, ax = plt.subplots(3, 1, layout="constrained", figsize=(6, 6), sharex=True)
+    fig, ax = plt.subplots(3, 2, layout="constrained", figsize=(12, 6), sharex="col")
     epochs = range(1, epoch + 1)
-    ax[0].semilogy(epochs, train_loss_avg[:epoch].cpu().numpy())
-    ax[1].semilogy(epochs, val_loss_avg[:epoch].cpu().numpy())
-    ax[2].plot(epochs, val_psnr[:epoch].cpu().numpy())
+    ax[0, 0].semilogy(epochs, train_loss_avg[:epoch].cpu().numpy())
+    ax[1, 0].semilogy(epochs, val_loss_avg[:epoch].cpu().numpy())
+    ax[2, 0].plot(epochs, val_psnr[:epoch].cpu().numpy())
 
-    ax[0].set_ylabel("training loss")
-    ax[1].set_ylabel("validation loss")
-    ax[2].set_ylabel("validation PSNR (dB)")
+    ax[0, 1].loglog(epochs, train_loss_avg[:epoch].cpu().numpy())
+    ax[1, 1].loglog(epochs, val_loss_avg[:epoch].cpu().numpy())
+    ax[2, 1].loglog(epochs, val_psnr[:epoch].cpu().numpy())
 
-    ax[2].set_xlabel("Epoch")
+    ax[0, 0].set_ylabel("training loss")
+    ax[1, 0].set_ylabel("validation loss")
+    ax[2, 0].set_ylabel("validation PSNR (dB)")
+
+    ax[-1, 0].set_xlabel("Epoch")
+    ax[-1, 1].set_xlabel("Epoch")
+
     for axx in ax.ravel():
         axx.grid(ls=":")
     fig.savefig(model_dir / "current_metrics.pdf")

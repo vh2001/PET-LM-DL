@@ -306,7 +306,6 @@ class MiniConvNet(torch.nn.Module):
     ):
         super().__init__()
         self.non_lin_func = ParamSmoothLeakyReLU(alpha=alpha, beta=beta)
-        print(self.non_lin_func.alpha, self.non_lin_func.beta)
 
         layers = [
             torch.nn.Conv3d(in_channels, num_features, kernel_size=3, padding="same")
@@ -378,7 +377,7 @@ class LMNet(torch.nn.Module):
             raise ValueError("conv_nets must be a list of modules or a single module")
 
         self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
-        self.nonneg_layer = ParamSmoothLeakyReLU(alpha=0.0, beta=12.0)
+        self.nonneg_layer = ParamSmoothLeakyReLU(alpha=0.0, beta=3.0)
         self.use_data_fidelity = use_data_fidelity
 
     def forward(
