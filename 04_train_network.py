@@ -115,7 +115,7 @@ print(f"Arguments saved to {model_dir / 'args.json'}")
 torch.manual_seed(seed)
 
 # setup the training data loader
-train_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))[
+train_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*_countlevel_1.0_*")))[
     :num_training_samples
 ]
 train_dataset = BrainwebLMPETDataset(train_dirs, shuffle=True)
@@ -127,7 +127,7 @@ train_loader = DataLoader(
 )
 
 # setup the validation data loader
-val_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))[
+val_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*_countlevel_1.0_*")))[
     num_training_samples : num_training_samples + num_validation_samples
 ]
 val_dataset = BrainwebLMPETDataset(val_dirs, shuffle=False)
