@@ -298,10 +298,17 @@ torch.save(
         "att_list": att_list,
         "contamination_list": contamination_list,
         "adjoint_ones": adjoint_ones,
-        "x_true": x_true,
         "x_att": x_att,
     },
     odir / "data_tensors.pt",
+)
+
+# save ground truth to separate file which allows faster training of img to img model
+torch.save(
+    {
+        "x_true": x_true,
+    },
+    odir / "ground_truth.pt",
 )
 
 

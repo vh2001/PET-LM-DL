@@ -9,11 +9,18 @@ from datetime import datetime
 from torchmetrics.image import PeakSignalNoiseRatio
 
 from data_utils import BrainwebLMPETDataset, brainweb_collate_fn
-from utils import plot_batch_input_output_target, MiniConvNet, LMNet
+from utils import plot_batch_input_output_target
+from models import UNet3D, LMNet
 
 
 # input parameters
 parser = argparse.ArgumentParser(description="Train LMNet for PET image reconstruction")
+parser.add_argument(
+    "--denoiser_model_path",
+    type=str,
+    help="Path to the denoise model",
+    default="denoiser_models/unet1/unet_best.pth",
+)
 parser.add_argument(
     "--num_epochs", type=int, default=100, help="Number of training epochs"
 )
@@ -21,20 +28,14 @@ parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
 parser.add_argument(
     "--num_blocks",
     type=int,
-    default=4,
+    default=2,
     help="Number of MiniConvNet blocks in LMNet",
 )
 parser.add_argument(
-    "--num_features",
-    type=int,
-    default=16,
-    help="Number of features in each MiniConvNet (hidden) layer",
-)
-parser.add_argument(
-    "--num_hidden_layers",
-    type=int,
-    default=1,
-    help="Number of hidden layers in each MiniConvNet",
+    "--count_level",
+    type=float,
+    default=1.0,
+    help="Count level of simulated PET data",
 )
 parser.add_argument(
     "--num_training_samples",
@@ -60,18 +61,6 @@ parser.add_argument(
     help="skip gradient descent data fidelity steps",
 )
 parser.add_argument(
-    "--alpha",
-    type=float,
-    default=0.02,
-    help="slope parameter for smooth non-linearity (negative part) for MiniConvNets",
-)
-parser.add_argument(
-    "--beta",
-    type=float,
-    default=4.0,
-    help="curvature parameter for smooth non-linearity (at 0) for MiniConvNets",
-)
-parser.add_argument(
     "--print_gradient_norms",
     action="store_true",
     help="Print gradient norms during training (useful for debugging)",
@@ -84,19 +73,15 @@ num_epochs = args.num_epochs
 lr = args.lr
 # number of blocks in the LMNet
 num_blocks = args.num_blocks
-# number of features in each MiniConvNet layer
-num_features = args.num_features
-# number of hidden layers in each MiniConvNet
-num_hidden_layers = args.num_hidden_layers
 num_training_samples = args.num_training_samples
 tr_batch_size = args.tr_batch_size
 num_validation_samples = args.num_validation_samples
 val_batch_size = args.val_batch_size
 weight_sharing = args.weight_sharing
 skip_data_fidelity: bool = args.skip_data_fidelity
-alpha: float = args.alpha
-beta: float = args.beta
 print_gradient_norms: bool = args.print_gradient_norms
+denoiser_model_path: Path = Path(args.denoiser_model_path)
+count_level: float = args.count_level
 
 # create a directory for the model checkpoints
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -111,13 +96,15 @@ with open(model_dir / "args.json", "w", encoding="UTF8") as f:
 print(f"Arguments saved to {model_dir / 'args.json'}")
 
 # %%
+# setup of data loaders
+################################################################################
 
 torch.manual_seed(seed)
 
 # setup the training data loader
-train_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*_countlevel_1.0_*")))[
-    :num_training_samples
-]
+train_dirs = sorted(
+    list(Path("data/sim_pet_data").glob(f"subject*_countlevel_{count_level:.1f}_*"))
+)[:num_training_samples]
 train_dataset = BrainwebLMPETDataset(train_dirs, shuffle=True)
 train_loader = DataLoader(
     train_dataset,
@@ -127,9 +114,9 @@ train_loader = DataLoader(
 )
 
 # setup the validation data loader
-val_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*_countlevel_1.0_*")))[
-    num_training_samples : num_training_samples + num_validation_samples
-]
+val_dirs = sorted(
+    list(Path("data/sim_pet_data").glob(f"subject*_countlevel_{count_level:.1f}_*"))
+)[num_training_samples : num_training_samples + num_validation_samples]
 val_dataset = BrainwebLMPETDataset(val_dirs, shuffle=False)
 val_loader = DataLoader(
     val_dataset,
@@ -137,30 +124,37 @@ val_loader = DataLoader(
     collate_fn=brainweb_collate_fn,
 )
 
-# model setup
+# %%
+# load the pre-trained denoiser model
+################################################################################
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# %% load the denoiser model
+# load "num_features" from args.json in the same directory as the denoiser model
+
+print(f"Loading denoiser model from {denoiser_model_path}")
+
+with open(denoiser_model_path.parent / "args.json", "r", encoding="UTF8") as f:
+    denoiser_args = json.load(f)
+num_features = denoiser_args.get("num_features")
+
+denoiser_model = UNet3D(features=num_features)
+state = torch.load(denoiser_model_path, map_location=device)
+state_dict = state["model_state_dict"]
+denoiser_model.load_state_dict(state_dict)
+denoiser_model = denoiser_model.to(device)
+
+# %%
+# setup of LMNet model (combination of data fidelity gradient layers and NNs)
+################################################################################
 
 if weight_sharing:
     # if weight sharing is used, create a single MiniConvNet and use it for all blocks
-    conv_nets = MiniConvNet(
-        num_features=num_features,
-        num_hidden_layers=num_hidden_layers,
-        alpha=alpha,
-        beta=beta,
-    )
+    conv_nets = denoiser_model
 else:
     # setup a list of mini conv nets - defined in utils.py
-    conv_nets = torch.nn.ModuleList(
-        [
-            MiniConvNet(
-                num_features=num_features,
-                num_hidden_layers=num_hidden_layers,
-                alpha=alpha,
-                beta=beta,
-            )
-            for _ in range(num_blocks)
-        ]
-    )
+    conv_nets = torch.nn.ModuleList([denoiser_model for _ in range(num_blocks)])
 
 # setup the LMNet model - defined in utils.py
 model = LMNet(
@@ -182,17 +176,9 @@ val_psnr = torch.zeros(num_epochs)
 val_loss_avg = torch.zeros(num_epochs)
 train_loss_avg = torch.zeros(num_epochs)
 
-
-# better initialization of the weights of Conv3d layers in the conv net
-def init_weights_he(m):
-    if isinstance(m, torch.nn.Conv3d):
-        # for ReLU activations, use nonlinearity='relu'
-        torch.nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
-        if m.bias is not None:
-            torch.nn.init.zeros_(m.bias)
-
-
-model.apply(init_weights_he)
+# %%
+# training + validation loop
+################################################################################
 
 # training loop
 model.train()

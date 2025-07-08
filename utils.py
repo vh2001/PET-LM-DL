@@ -3,9 +3,7 @@ import parallelproj
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch.nn.functional as F
 from matplotlib.backends.backend_pdf import PdfPages
-from pathlib import Path
 
 
 class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
@@ -251,194 +249,49 @@ def plot_batch_intermediate_images(x_intermed):
         fig.savefig(f"intermediate_images_sample_{sample_idx}.png")
 
 
-class SmoothLeakyClippedReLU(torch.nn.Module):
-    def __init__(self, alpha=-0.1):
-        super().__init__()
-        self.alpha = alpha
-        self.a = (1 - alpha) / 2
-        self.b = alpha
-        self.d = (alpha - 1) / 2
-
-    def forward(self, x):
-        a, b, d = self.a, self.b, self.d
-        return torch.where(
-            x <= 0, self.alpha * x, torch.where(x < 1, a * x**2 + b * x, x + d)
-        )
-
-
-class ParamSmoothLeakyReLU(torch.nn.Module):
-    def __init__(self, alpha: float, beta: float):
-        """
-        f(x) = alpha*x + (1-alpha) * Softplus(beta*x) / beta
-
-        - alpha controls the negative slope, reasoabke value 0.02
-        - beta > 0 controls how quickly f(x) -> x for x > 0.
-            small beta: slow, gentle transition
-            large beta: sharp, nearly ReLU-like transition at x≈0
-            reasonable value 4.0
-
-        Requires: 0 <= alpha < 1, beta > 0.
-        """
-        super().__init__()
-        if not (0.0 <= alpha < 1.0):
-            raise ValueError(f"alpha must be in [0,1), got {alpha}")
-        if beta <= 0:
-            raise ValueError(f"beta must be positive, got {beta}")
-        self.alpha = alpha
-        self.beta = beta
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # scaled softplus: (1/beta)*log(1 + exp(beta*x))
-        sp = F.softplus(self.beta * x) / self.beta
-        return self.alpha * x + (1.0 - self.alpha) * sp
+# class SmoothLeakyClippedReLU(torch.nn.Module):
+#    def __init__(self, alpha=-0.1):
+#        super().__init__()
+#        self.alpha = alpha
+#        self.a = (1 - alpha) / 2
+#        self.b = alpha
+#        self.d = (alpha - 1) / 2
+#
+#    def forward(self, x):
+#        a, b, d = self.a, self.b, self.d
+#        return torch.where(
+#            x <= 0, self.alpha * x, torch.where(x < 1, a * x**2 + b * x, x + d)
+#        )
+#
+#
+# class ParamSmoothLeakyReLU(torch.nn.Module):
+#    def __init__(self, alpha: float, beta: float):
+#        """
+#        f(x) = alpha*x + (1-alpha) * Softplus(beta*x) / beta
+#
+#        - alpha controls the negative slope, reasoabke value 0.02
+#        - beta > 0 controls how quickly f(x) -> x for x > 0.
+#            small beta: slow, gentle transition
+#            large beta: sharp, nearly ReLU-like transition at x≈0
+#            reasonable value 4.0
+#
+#        Requires: 0 <= alpha < 1, beta > 0.
+#        """
+#        super().__init__()
+#        if not (0.0 <= alpha < 1.0):
+#            raise ValueError(f"alpha must be in [0,1), got {alpha}")
+#        if beta <= 0:
+#            raise ValueError(f"beta must be positive, got {beta}")
+#        self.alpha = alpha
+#        self.beta = beta
+#
+#    def forward(self, x: torch.Tensor) -> torch.Tensor:
+#        # scaled softplus: (1/beta)*log(1 + exp(beta*x))
+#        sp = F.softplus(self.beta * x) / self.beta
+#        return self.alpha * x + (1.0 - self.alpha) * sp
 
 
 # 2. Define a mini 3D conv net block
-class MiniConvNet(torch.nn.Module):
-    def __init__(
-        self,
-        in_channels=1,
-        out_channels=1,
-        num_features=8,
-        num_hidden_layers=1,
-        alpha=0.02,
-        beta=4.0,
-    ):
-        super().__init__()
-        self.non_lin_func = ParamSmoothLeakyReLU(alpha=alpha, beta=beta)
-
-        layers = [
-            torch.nn.Conv3d(in_channels, num_features, kernel_size=3, padding="same")
-        ]
-        for _ in range(num_hidden_layers):
-            layers.append(
-                torch.nn.Conv3d(
-                    num_features, num_features, kernel_size=3, padding="same"
-                )
-            )
-            layers.append(self.non_lin_func)
-        layers.append(
-            torch.nn.Conv3d(num_features, out_channels, kernel_size=3, padding="same")
-        )
-
-        self.conv = torch.nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.conv(x)
 
 
 # 3. Define the full model
-class LMNet(torch.nn.Module):
-    def __init__(
-        self,
-        conv_nets: torch.nn.ModuleList | torch.nn.Module,
-        num_blocks: int | None = None,
-        use_data_fidelity: bool = True,
-    ):
-        """_summary_
-
-        Parameters
-        ----------
-        conv_nets : torch.nn.ModuleList | torch.nn.Module
-            (list of) convolutional networks. If a single module is passed,
-            the same network is used for all blocks.
-        num_blocks : int | None, optional
-            number of unrolled blocks. only needed for weight-shared case, by default None
-        use_data_fidelity : bool, optional
-            whether to do a preconditioned data fidelity gradient step
-            before the neural network step in every block, by default True
-        """
-        super().__init__()
-
-        if isinstance(conv_nets, torch.nn.ModuleList):
-            self.weight_sharing = False
-            self.conv_net_list = conv_nets
-            self.num_blocks: int = len(conv_nets)
-            # dummy init for step sizes - not used in forward pass
-            self.step_sizes_raw: torch.Tensor = torch.ones(self.num_blocks)
-
-        elif isinstance(conv_nets, torch.nn.Module):
-            self.weight_sharing = True
-            self.conv_net_list = torch.nn.ModuleList([conv_nets])
-
-            if num_blocks is None:
-                raise ValueError(
-                    "num_blocks must be specified if conv_nets is a single module"
-                )
-
-            self.num_blocks: int = num_blocks
-
-            # if weights are shared, it is better to use trainable step sizes (by default)
-            self.trainable_step_sizes = True
-            self.step_sizes_raw: torch.nn.Parameter = torch.nn.Parameter(
-                torch.ones(self.num_blocks)
-            )
-        else:
-            raise ValueError("conv_nets must be a list of modules or a single module")
-
-        self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
-        self.nonneg_layer = ParamSmoothLeakyReLU(alpha=0.0, beta=3.0)
-        self.use_data_fidelity = use_data_fidelity
-
-    def forward(
-        self,
-        x,
-        lm_pet_lin_ops,
-        contamination_lists,
-        adjoint_ones,
-        diag_preconds,
-        intermediate_plots=False,
-    ):
-
-        # PET images can have arbitrary global scales, but we don't want to
-        # normalize before calculating the log-likelihood gradient
-        # instead we calculate scales of all images in the batch and apply
-        # them only before using the neural network
-
-        # as scale we use the mean of the input images
-        # if we are using early stopped OSEM images, the mean is well defined
-        # and stable
-
-        sample_scales = x.mean(dim=(2, 3, 4), keepdim=True)
-
-        x_intermed = []
-
-        for i in range(self.num_blocks):
-
-            # (preconditioned) gradient step on the data fidelity term
-            if self.use_data_fidelity:
-                xd = x - self.lm_logL_grad_layer(
-                    x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
-                )
-            else:
-                xd = x
-
-            # neueral network step
-            if self.weight_sharing:
-                # use the same network for all blocks
-                xn = self.conv_net_list[0](xd / sample_scales)
-                # we have to make sure that the output of the network non negative
-                # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
-                # the softplus around the step size is needed to make sure that the step size is positive
-                xo = self.nonneg_layer(
-                    xd
-                    - torch.nn.functional.softplus(self.step_sizes_raw[i])
-                    * xn
-                    * sample_scales
-                )
-            else:
-                xn = sample_scales * self.conv_net_list[i](xd / sample_scales)
-                # we have to make sure that the output of the network non negative
-                # we use a smoothed ReLU with seems to work much better than a simple ReLU (for the optimization)
-                xo = self.nonneg_layer(xd - xn)
-
-            if intermediate_plots:
-                x_intermed.append(to_np(xd))
-                x_intermed.append(to_np(xo))
-
-            x = xo
-
-        if intermediate_plots:
-            plot_batch_intermediate_images(np.array(x_intermed).squeeze())
-
-        return x
