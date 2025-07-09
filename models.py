@@ -250,6 +250,9 @@ def detailed_param_count(model):
     print(f"{'-'*60}\nTotal trainable parameters: {total:,}")
 
 
+### DONT FORGET TO ADD YOUR CUSTOM DENOISING MODEL TO THE REGISTRY ###
+DENOISER_MODEL_REGISTRY = {"MiniConvNet": MiniConvNet, "UNet3D": UNet3D}
+
 # Example usage
 if __name__ == "__main__":
     xb = torch.randn(1, 1, 57, 71, 93)

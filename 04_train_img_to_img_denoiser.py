@@ -13,21 +13,41 @@ from torchmetrics.image import PeakSignalNoiseRatio
 
 from data_utils import BrainwebLMPETDataset
 from utils import plot_batch_input_output_target
-from models import UNet3D
+from models import DENOISER_MODEL_REGISTRY
+
+
+def parse_json_model_kwargs(arg: str):
+    try:
+        obj = json.loads(arg)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError(f"Invalid JSON for --model-kwargs: {e}")
+    if not isinstance(obj, dict):
+        raise argparse.ArgumentTypeError(
+            "--model-kwargs must be a JSON object (i.e. dict)"
+        )
+    return obj
 
 
 # input parameters
-parser = argparse.ArgumentParser(description="Train LMNet for PET image reconstruction")
+parser = argparse.ArgumentParser(description="Train image to image denoiser model")
+
+parser.add_argument(
+    "model_class",
+    choices=DENOISER_MODEL_REGISTRY.keys(),
+    help="Which model to train (e.g. UNet3D)",
+)
+parser.add_argument(
+    "--model_kwargs",
+    type=parse_json_model_kwargs,
+    default={},
+    help="JSON-encoded dict of init args for the model, e.g. "
+    '\'{"features":[8,16,32]}\' or \'{"num_layers":3,"out_dim":256}\'',
+)
+
 parser.add_argument(
     "--num_epochs", type=int, default=100, help="Number of training epochs"
 )
 parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-parser.add_argument(
-    "--num_features",
-    type=int,
-    default=[16, 32, 64],
-    nargs="+",
-)
 parser.add_argument(
     "--num_training_samples",
     type=int,
@@ -56,11 +76,13 @@ parser.add_argument(
 
 args = parser.parse_args()
 
+model_class: str = args.model_class
+model_kwargs = args.model_kwargs
+
 seed = args.seed
 count_level = args.count_level
 num_epochs = args.num_epochs
 lr = args.lr
-num_features = args.num_features
 num_training_samples = args.num_training_samples
 tr_batch_size = args.tr_batch_size
 num_validation_samples = args.num_validation_samples
@@ -69,7 +91,7 @@ print_gradient_norms: bool = args.print_gradient_norms
 
 # create a directory for the model checkpoints
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-model_dir = Path(f"checkpoints_denoiser/unet_run_{run_id}")
+model_dir = Path(f"checkpoints_denoiser/{model_class}_run_{run_id}")
 model_dir.mkdir(parents=True, exist_ok=True)
 
 # auto convert the Namespace args to a dictionary
@@ -85,10 +107,16 @@ print(f"Arguments saved to {model_dir / 'args.json'}")
 
 torch.manual_seed(seed)
 
-# setup the training data loader
-train_dirs = sorted(
+all_data_dirs = sorted(
     list(Path("data/sim_pet_data").glob(f"subject*_countlevel_{count_level:.1f}_*"))
-)[:num_training_samples]
+)
+
+# setup the training data loader
+train_dirs = all_data_dirs[:num_training_samples]
+
+# write the training directories to a json file
+with open(model_dir / "train_dirs.json", "w", encoding="UTF8") as f:
+    json.dump([str(d) for d in train_dirs], f, indent=4)
 
 # make sure that skip_raw_data is set to True
 # in this case the loader only returns the OSEM input image and the ground truth which is faster
@@ -100,9 +128,14 @@ train_loader = DataLoader(
 )
 
 # setup the validation data loader
-val_dirs = sorted(
-    list(Path("data/sim_pet_data").glob(f"subject*_countlevel_{count_level:.1f}_*"))
-)[num_training_samples : num_training_samples + num_validation_samples]
+val_dirs = all_data_dirs[
+    num_training_samples : num_training_samples + num_validation_samples
+]
+
+# write the validation directories to a json file
+with open(model_dir / "val_dirs.json", "w", encoding="UTF8") as f:
+    json.dump([str(d) for d in val_dirs], f, indent=4)
+
 # make sure that skip_raw_data is set to True
 # in this case the loader only returns the OSEM input image and the ground truth which is faster
 val_dataset = BrainwebLMPETDataset(val_dirs, shuffle=False, skip_raw_data=True)
@@ -122,7 +155,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # in principle we can have any NN here
 # if we want to use in in combination with data fidelity gradient layers,
 # we should make sure that the output is non-negative
-model = UNet3D(features=num_features).to(device)
+model = DENOISER_MODEL_REGISTRY[model_class](**model_kwargs).to(device)
 
 # setup the optimizer and loss function
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -213,19 +246,21 @@ for epoch in range(1, num_epochs + 1):
     # save model checkpoint
     torch.save(
         {
+            "model_class": model_class,
+            "model_kwargs": model_kwargs,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
             "val_pnsr": val_psnr[epoch - 1],
             "val_loss": val_loss_avg,
         },
-        model_dir / f"unet_epoch_{epoch:04}.pth",
+        model_dir / f"epoch_{epoch:04}.pth",
     )
 
     # if the current val_psnr is the best so far, save the model
     if epoch == 1 or val_psnr[epoch - 1] > val_psnr[: epoch - 1].max():
-        best_model_path = model_dir / "unet_best.pth"
-        epoch_model_path = model_dir / f"unet_epoch_{epoch:04}.pth"
+        best_model_path = model_dir / "best.pth"
+        epoch_model_path = model_dir / f"epoch_{epoch:04}.pth"
         # Remove existing symlink if it exists
         if best_model_path.exists() or best_model_path.is_symlink():
             best_model_path.unlink()
