@@ -45,13 +45,56 @@ conda activate pet-lm-dl
    This script will place the reconstructed images `data/sim_pet_data/<dataset>/mlem_reconstructions.pt`
    and also create a `mlem.png` showing MLEM images and ground truth images.
 
-4. **Note**
+## Training a simple image to image denoising neural network without using data fidelity
 
-   You can also run `01_simulate_data.py` and `02_lm_mlem.py` to simulate and
-   reconstruct individual data sets.
+Once the data is simulated and the MLEM reconstruction are generated,
+we can train a simple neural network that maps from the noisy MLEM image to the
+simulated ground truth in image space.
 
-## Supervised Training of a listmode PET network 
+```bash
+python 04_train_img_to_img_denoiser.py MiniConvNet --model_kwargs '{"num_features":16, "num_hidden_layers":4}' --num_epochs 500
+```
 
-- `04_train_network.py` is a simple script for training a mini unrolled network on the simulated PET data.
-It should be seen as a proof-of-concept script, that can be used to setup, train and optimize
-more advanced architectures. 
+or 
+
+```bash
+python 04_train_img_to_img_denoiser.py UNet3D --model_kwargs '{"features":[16,32]}' --num_epochs 500
+```
+
+The first argument must be the name of torch model defined in models.py that 
+defines the image-to-image model architecture.
+You can define your own custom model architectures, but you should not change / overwrite
+existing classes to keep backward compatibility.
+If you implement custom models, make sure that the output is non-negative
+(e.g. by adding a final ReLU).
+
+This script will save model checkpoints and a pdf containing evaluation metrics
+in `checkpoints_denoiser`.
+
+To evaluate a trained model (checkpoint) you can run
+```bash
+python 05_eval_img_to_img_denoiser.py checkpoint_denoiser/my_run/my_ckpt.pt
+```
+
+## Training an unrolled network using data fidelity gradient layers
+
+Once we have pre-trained an image to image denoiser, we can train more
+complicated unrolled network with blocks consisting of data fidelity gradient
+layers follwed by a trainable neural network.
+
+```bash
+python 06_train_unrolled_net.py checkpoints_denoiser/MiniConvNet_1/best.pth --lr 1e-3 --num_epochs 100 --num_blocks 4
+```
+
+The first argument must be saved checkpoint path that contains the pre-trained denoiser.
+Note that training these networks will take much more memory and time, since we
+have to backpropagate through the data fidelity gradient layers (requires
+2 forward and 1 back projection per layer).
+
+This script will save model checkpoints and a pdf containing evaluation metrics
+in `checkpoints_unrolled`.
+
+To evaluate a trained model (checkpoint) you can run
+```bash
+python 07_eval_unrolled_net.py checkpoint_unrolled/my_run/my_ckpt.pt
+```
