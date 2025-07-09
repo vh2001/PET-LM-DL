@@ -15,9 +15,11 @@ class MiniConvNet(torch.nn.Module):
         out_channels=1,
         num_features=8,
         num_hidden_layers=3,
+        renorm=True,
     ):
         super().__init__()
         self.non_lin_func = nn.ReLU(inplace=True)
+        self.renorm = renorm
 
         layers = [
             torch.nn.Conv3d(in_channels, num_features, kernel_size=3, padding="same")
@@ -36,7 +38,13 @@ class MiniConvNet(torch.nn.Module):
         self.conv = torch.nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.non_lin_func(x - self.conv(x))
+        if self.renorm:
+            # renormalize the input by the mean scale
+            # important since PET images can have an "arbitrary" global scale
+            sample_scales = x.mean(dim=(2, 3, 4), keepdim=True)
+            return self.non_lin_func(x - sample_scales * self.conv(x / sample_scales))
+        else:
+            return self.non_lin_func(x - self.conv(x))
 
 
 class DoubleConv(nn.Module):
@@ -94,7 +102,9 @@ class UpSampleConv(nn.Module):
 
 
 class UNet3D(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, features=[16, 32], renorm=True):
+    """3D U-Net architecture for image to image mappings"""
+
+    def __init__(self, in_channels=1, out_channels=1, features=[32, 64], renorm=True):
         super().__init__()
         self.renorm = renorm
         # Encoder
@@ -130,8 +140,11 @@ class UNet3D(nn.Module):
         input_x = x  # Save the original input
 
         if self.renorm:
+            # renormalize the input by the mean scale
+            # important since PET images can have an "arbitrary" global scale
             sample_scales = x.mean(dim=(2, 3, 4), keepdim=True)
-            x = x / sample_scales  # Normalize by the mean scale
+            x = x / sample_scales
+
         skips = []
         # Encoder path
         for down, pool in zip(self.downs, self.pools):
@@ -158,45 +171,44 @@ class UNet3D(nn.Module):
 class LMNet(torch.nn.Module):
     def __init__(
         self,
-        conv_nets: torch.nn.ModuleList | torch.nn.Module,
-        num_blocks: int | None = None,
+        conv_nets: torch.nn.ModuleList,
+        num_blocks: int,
         use_data_fidelity: bool = True,
+        weight_sharing: bool = False,
     ):
-        """_summary_
+        """Unrolled neural network for PET image reconstruction using listmode (LM) data.
 
         Parameters
         ----------
         conv_nets : torch.nn.ModuleList | torch.nn.Module
             (list of) convolutional networks. If a single module is passed,
             the same network is used for all blocks.
+            The output of these models must be non-negative.
         num_blocks : int | None, optional
-            number of unrolled blocks. only needed for weight-shared case, by default None
+            number of unrolled blocks. each block consists of a data fidelity gradient step
+            and a neural network step.
         use_data_fidelity : bool, optional
             whether to do a preconditioned data fidelity gradient step
             before the neural network step in every block, by default True
+            (useful to test how much data fidelity helps)
         """
         super().__init__()
 
-        if isinstance(conv_nets, torch.nn.ModuleList):
-            self.weight_sharing = False
-            self.conv_net_list = conv_nets
-            self.num_blocks: int = len(conv_nets)
+        self.weight_sharing = weight_sharing
+        self.num_blocks = num_blocks
+        self.conv_net_list = conv_nets
 
-        elif isinstance(conv_nets, torch.nn.Module):
-            self.weight_sharing = True
-            self.conv_net_list = torch.nn.ModuleList([conv_nets])
+        if self.weight_sharing and len(conv_nets) != 1:
+            raise ValueError(
+                "If weight sharing is used, conv_nets must be a ModuleList with a single element."
+            )
 
-            if num_blocks is None:
-                raise ValueError(
-                    "num_blocks must be specified if conv_nets is a single module"
-                )
-
-            self.num_blocks: int = num_blocks
-        else:
-            raise ValueError("conv_nets must be a list of modules or a single module")
+        if not self.weight_sharing and (len(conv_nets) != self.num_blocks):
+            raise ValueError(
+                "If weight sharing is not used, conv_nets must be a list of length num_blocks."
+            )
 
         self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
-        self.nonneg_layer = nn.ReLU(inplace=True)
         self.use_data_fidelity = use_data_fidelity
 
     def forward(
@@ -209,11 +221,13 @@ class LMNet(torch.nn.Module):
         intermediate_plots=False,
     ):
 
+        # list for intermediate images for debugging plots
         x_intermed = []
 
         for i in range(self.num_blocks):
-            # (preconditioned) gradient step on the data fidelity term
             if self.use_data_fidelity:
+                # (preconditioned) gradient step on the data fidelity term
+                # xd = x - diag_preconditioner * \nabla_x PET_data_fidelity(x)
                 xd = x - self.lm_logL_grad_layer(
                     x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
                 )

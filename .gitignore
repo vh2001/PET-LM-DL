@@ -1,6 +1,7 @@
 # user defines
 denoiser_models/*
 checkpoints_denoiser/*
+checkpoints_unrolled/*
 checkpoints/*
 promising_checkpoints/*
 data/*

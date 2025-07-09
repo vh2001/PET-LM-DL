@@ -1,3 +1,4 @@
+import argparse
 import torch
 from torch.utils.data import DataLoader
 from pathlib import Path
@@ -5,15 +6,14 @@ import json
 from torchmetrics.image import PeakSignalNoiseRatio
 
 from data_utils import BrainwebLMPETDataset, brainweb_collate_fn
-from utils import LMNet, MiniConvNet, plot_batch_input_output_target
-import argparse
+from utils import plot_batch_input_output_target
+from models import DENOISER_MODEL_REGISTRY, LMNet
 
 # ---- Config ----
 parser = argparse.ArgumentParser(description="Evaluate LMNet model on validation data.")
 parser.add_argument(
-    "--checkpoint_path",
+    "checkpoint_path",
     type=str,
-    required=True,
     help="Path to the model checkpoint (.pth file).",
 )
 parser.add_argument(
@@ -23,29 +23,21 @@ parser.add_argument(
 )
 args_cli = parser.parse_args()
 
-checkpoint_path = args_cli.checkpoint_path
+checkpoint_path = Path(args_cli.checkpoint_path)
 intermediate_plots = args_cli.intermediate_plots
+model_dir = checkpoint_path.parent
 
 # ---- Load Args ----
 args_path = Path(checkpoint_path).parent / "args.json"
 with open(args_path, "r", encoding="UTF8") as f:
     args = json.load(f)
 
-num_training_samples = args["num_training_samples"]
-num_validation_samples = args["num_validation_samples"]
-num_blocks = args["num_blocks"]
-num_features = args["num_features"]
-num_hidden_layers = args.get("num_hidden_layers", 1)
-weight_sharing = args.get("weight_sharing", False)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-alpha = args.get("alpha")
-beta = args.get("beta")
+val_batch_size = args.get("val_batch_size", 5)
 
-# ---- Setup Validation DataLoader ----
-val_dirs = sorted(list(Path("data/sim_pet_data").glob("subject*")))[
-    num_training_samples : num_training_samples + num_validation_samples
-]
-val_batch_size = 5
+
+# read validation directories from the checkpoint
+with open(model_dir / "val_dirs.json", "r", encoding="UTF8") as f:
+    val_dirs = [Path(d) for d in json.load(f)]
 
 
 val_dataset = BrainwebLMPETDataset(val_dirs, shuffle=False)
@@ -55,44 +47,39 @@ val_loader = DataLoader(
     collate_fn=brainweb_collate_fn,
 )
 
-# ---- Rebuild Model ----
+# %%
+# build the model
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+ckpt = torch.load(checkpoint_path, map_location="cpu")
+
+# build the denoiser model
+denoiser_model_class = ckpt["denoiser_model_class"]
+denoiser_model_kwargs = ckpt["denoiser_model_kwargs"]
+
+denoiser_model = DENOISER_MODEL_REGISTRY[denoiser_model_class](**denoiser_model_kwargs)
+
+denoiser_model.to(device)
+
+# rebuild the unrolled model
+model_kwargs = ckpt["model_kwargs"]
+num_blocks = ckpt["num_blocks"]
+weight_sharing = model_kwargs.get("weight_sharing", False)
+
 if weight_sharing:
-    conv_nets = MiniConvNet(
-        num_features=num_features, num_hidden_layers=num_hidden_layers, alpha=alpha
-    )
+    conv_nets = torch.nn.ModuleList([denoiser_model])
 else:
-    conv_nets = torch.nn.ModuleList(
-        [
-            MiniConvNet(
-                num_features=num_features,
-                num_hidden_layers=num_hidden_layers,
-                alpha=alpha,
-            )
-            for _ in range(num_blocks)
-        ]
-    )
+    conv_nets = torch.nn.ModuleList([denoiser_model for _ in range(num_blocks)])
 
-model = LMNet(conv_nets=conv_nets, num_blocks=num_blocks)
+# setup the LMNet model
+model = LMNet(conv_nets, num_blocks, **model_kwargs)
+model.load_state_dict(ckpt["model_state_dict"])
+model.to(device)
 
+# -------------------------------------------------------------------------------
 
-state = torch.load(checkpoint_path, map_location=device)
-state_dict = state["model_state_dict"]
-
-######### HACK NEEDED BECAUSE VARIABLE IN LMNET WAS RENAMED
-## Remap keys from 'convs.' to 'conv_net_list.'
-# new_state_dict = {}
-# for k, v in state_dict.items():
-#    if k.startswith("convs."):
-#        new_k = k.replace("convs.", "conv_net_list.", 1)
-#    else:
-#        new_k = k
-#    new_state_dict[new_k] = v
-#########
-
-
-model.load_state_dict(state_dict)
-model = model.to(device)
-model.eval()
+# %%
 
 psnr = PeakSignalNoiseRatio().to(device)
 
@@ -102,6 +89,7 @@ val_psnrs = []
 
 criterion = torch.nn.MSELoss()
 
+model.eval()
 with torch.no_grad():
     for batch_idx, batch in enumerate(val_loader):
         x = batch["input"].to(device)

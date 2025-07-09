@@ -10,33 +10,51 @@ from torchmetrics.image import PeakSignalNoiseRatio
 
 from data_utils import BrainwebLMPETDataset, brainweb_collate_fn
 from utils import plot_batch_input_output_target
-from models import UNet3D, LMNet
+from models import DENOISER_MODEL_REGISTRY, LMNet
+
+
+def parse_json_model_kwargs(arg: str):
+    try:
+        obj = json.loads(arg)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError(f"Invalid JSON for --model-kwargs: {e}")
+    if not isinstance(obj, dict):
+        raise argparse.ArgumentTypeError(
+            "--model-kwargs must be a JSON object (i.e. dict)"
+        )
+    return obj
 
 
 # input parameters
 parser = argparse.ArgumentParser(description="Train LMNet for PET image reconstruction")
 parser.add_argument(
-    "--denoiser_model_path",
+    "denoiser_model_path",
     type=str,
-    help="Path to the denoise model",
-    default="denoiser_models/unet1/unet_best.pth",
+    help="checkpoint path to pretraind denoiser model",
 )
 parser.add_argument(
-    "--num_epochs", type=int, default=100, help="Number of training epochs"
+    "--num_blocks", type=int, default=2, help="Number of unrolled blocks"
 )
-parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-parser.add_argument(
-    "--num_blocks",
-    type=int,
-    default=2,
-    help="Number of MiniConvNet blocks in LMNet",
-)
+
 parser.add_argument(
     "--count_level",
     type=float,
     default=1.0,
     help="Count level of simulated PET data",
 )
+parser.add_argument(
+    "--num_epochs", type=int, default=100, help="Number of training epochs"
+)
+parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+
+parser.add_argument(
+    "--model_kwargs",
+    type=parse_json_model_kwargs,
+    default={},
+    help="JSON-encoded dict of init args for the unrolled model, e.g. "
+    "'{\"weight_sharing\":True}'",
+)
+
 parser.add_argument(
     "--num_training_samples",
     type=int,
@@ -56,11 +74,6 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=42, help="Random seed")
 parser.add_argument("--weight_sharing", action="store_true", help="Use weight sharing")
 parser.add_argument(
-    "--skip_data_fidelity",
-    action="store_true",
-    help="skip gradient descent data fidelity steps",
-)
-parser.add_argument(
     "--print_gradient_norms",
     action="store_true",
     help="Print gradient norms during training (useful for debugging)",
@@ -71,21 +84,20 @@ args = parser.parse_args()
 seed = args.seed
 num_epochs = args.num_epochs
 lr = args.lr
-# number of blocks in the LMNet
-num_blocks = args.num_blocks
 num_training_samples = args.num_training_samples
 tr_batch_size = args.tr_batch_size
 num_validation_samples = args.num_validation_samples
 val_batch_size = args.val_batch_size
 weight_sharing = args.weight_sharing
-skip_data_fidelity: bool = args.skip_data_fidelity
 print_gradient_norms: bool = args.print_gradient_norms
 denoiser_model_path: Path = Path(args.denoiser_model_path)
+num_blocks: int = args.num_blocks
 count_level: float = args.count_level
+model_kwargs: dict = args.model_kwargs
 
 # create a directory for the model checkpoints
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-model_dir = Path(f"checkpoints/lmnet_run_{run_id}")
+model_dir = Path(f"checkpoints_unrolled/lmnet_run_{run_id}")
 model_dir.mkdir(parents=True, exist_ok=True)
 
 # auto convert the Namespace args to a dictionary
@@ -101,11 +113,19 @@ print(f"Arguments saved to {model_dir / 'args.json'}")
 
 torch.manual_seed(seed)
 
-# setup the training data loader
-train_dirs = sorted(
+all_data_dirs = sorted(
     list(Path("data/sim_pet_data").glob(f"subject*_countlevel_{count_level:.1f}_*"))
-)[:num_training_samples]
-train_dataset = BrainwebLMPETDataset(train_dirs, shuffle=True)
+)
+
+# setup the training data loader
+train_dirs = all_data_dirs[:num_training_samples]
+
+# write the training directories to a json file
+with open(model_dir / "train_dirs.json", "w", encoding="UTF8") as f:
+    json.dump([str(d) for d in train_dirs], f, indent=4)
+
+
+train_dataset = BrainwebLMPETDataset(train_dirs, shuffle=True, skip_raw_data=False)
 train_loader = DataLoader(
     train_dataset,
     batch_size=tr_batch_size,
@@ -114,10 +134,15 @@ train_loader = DataLoader(
 )
 
 # setup the validation data loader
-val_dirs = sorted(
-    list(Path("data/sim_pet_data").glob(f"subject*_countlevel_{count_level:.1f}_*"))
-)[num_training_samples : num_training_samples + num_validation_samples]
-val_dataset = BrainwebLMPETDataset(val_dirs, shuffle=False)
+val_dirs = all_data_dirs[
+    num_training_samples : num_training_samples + num_validation_samples
+]
+
+# write the validation directories to a json file
+with open(model_dir / "val_dirs.json", "w", encoding="UTF8") as f:
+    json.dump([str(d) for d in val_dirs], f, indent=4)
+
+val_dataset = BrainwebLMPETDataset(val_dirs, shuffle=False, skip_raw_data=False)
 val_loader = DataLoader(
     val_dataset,
     batch_size=val_batch_size,
@@ -133,33 +158,37 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # %% load the denoiser model
 # load "num_features" from args.json in the same directory as the denoiser model
 
-print(f"Loading denoiser model from {denoiser_model_path}")
+# load the checkpoint
+denoiser_checkpoint = torch.load(denoiser_model_path, map_location="cpu")
+denoiser_model_class = denoiser_checkpoint["model_class"]
+denoiser_model_kwargs = denoiser_checkpoint["model_kwargs"]
 
-with open(denoiser_model_path.parent / "args.json", "r", encoding="UTF8") as f:
-    denoiser_args = json.load(f)
-num_features = denoiser_args.get("num_features")
+# model setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-denoiser_model = UNet3D(features=num_features)
-state = torch.load(denoiser_model_path, map_location=device)
-state_dict = state["model_state_dict"]
-denoiser_model.load_state_dict(state_dict)
-denoiser_model = denoiser_model.to(device)
+# in principle we can have any NN here
+# if we want to use in in combination with data fidelity gradient layers,
+# we should make sure that the output is non-negative
+denoiser_model = DENOISER_MODEL_REGISTRY[denoiser_model_class](**denoiser_model_kwargs)
+
+# load the model state dict from the checkpoint
+denoiser_model.load_state_dict(denoiser_checkpoint["model_state_dict"])
+denoiser_model.to(device)
+
 
 # %%
 # setup of LMNet model (combination of data fidelity gradient layers and NNs)
 ################################################################################
 
+weight_sharing = model_kwargs.get("weight_sharing", False)
+
 if weight_sharing:
-    # if weight sharing is used, create a single MiniConvNet and use it for all blocks
-    conv_nets = denoiser_model
+    conv_nets = torch.nn.ModuleList([denoiser_model])
 else:
-    # setup a list of mini conv nets - defined in utils.py
     conv_nets = torch.nn.ModuleList([denoiser_model for _ in range(num_blocks)])
 
-# setup the LMNet model - defined in utils.py
-model = LMNet(
-    conv_nets=conv_nets, num_blocks=num_blocks, use_data_fidelity=not skip_data_fidelity
-).to(device)
+# setup the LMNet model
+model = LMNet(conv_nets, num_blocks, **model_kwargs).to(device)
 
 # setup the optimizer and loss function
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -270,19 +299,25 @@ for epoch in range(1, num_epochs + 1):
     # save model checkpoint
     torch.save(
         {
+            "model_kwargs": model_kwargs,
+            "num_blocks": num_blocks,
+            "denoiser_model_path": str(denoiser_model_path),
+            "denoiser_model_class": denoiser_model_class,
+            "denoiser_model_kwargs": denoiser_model_kwargs,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
             "val_pnsr": val_psnr[epoch - 1],
             "val_loss": val_loss_avg,
+            "train_loss": train_loss_avg[epoch - 1],
         },
-        model_dir / f"lmnet_epoch_{epoch:04}.pth",
+        model_dir / f"epoch_{epoch:04}.pth",
     )
 
     # if the current val_psnr is the best so far, save the model
     if epoch == 1 or val_psnr[epoch - 1] > val_psnr[: epoch - 1].max():
-        best_model_path = model_dir / "lmnet_best.pth"
-        epoch_model_path = model_dir / f"lmnet_epoch_{epoch:04}.pth"
+        best_model_path = model_dir / "best.pth"
+        epoch_model_path = model_dir / f"epoch_{epoch:04}.pth"
         # Remove existing symlink if it exists
         if best_model_path.exists() or best_model_path.is_symlink():
             best_model_path.unlink()
@@ -299,7 +334,7 @@ for epoch in range(1, num_epochs + 1):
 
     ax[0, 1].loglog(epochs, train_loss_avg[:epoch].cpu().numpy())
     ax[1, 1].loglog(epochs, val_loss_avg[:epoch].cpu().numpy())
-    ax[2, 1].loglog(epochs, val_psnr[:epoch].cpu().numpy())
+    ax[2, 1].semilogx(epochs, val_psnr[:epoch].cpu().numpy())
 
     ax[0, 0].set_ylabel("training loss")
     ax[1, 0].set_ylabel("validation loss")

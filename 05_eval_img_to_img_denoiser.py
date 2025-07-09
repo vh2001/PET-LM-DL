@@ -65,7 +65,6 @@ model_kwargs = checkpoint["model_kwargs"]
 # model setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# setup UNET model
 # in principle we can have any NN here
 # if we want to use in in combination with data fidelity gradient layers,
 # we should make sure that the output is non-negative
