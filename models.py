@@ -16,9 +16,14 @@ class MiniConvNet(torch.nn.Module):
         num_features=8,
         num_hidden_layers=3,
         renorm=True,
+        beta=0.0,
     ):
         super().__init__()
-        self.non_lin_func = nn.ReLU(inplace=True)
+        if beta == 0:
+            self.non_lin_func = nn.ReLU(inplace=True)
+        else:
+            self.non_lin_func = nn.Softplus(beta=beta)
+
         self.renorm = renorm
 
         layers = [
@@ -104,7 +109,9 @@ class UpSampleConv(nn.Module):
 class UNet3D(nn.Module):
     """3D U-Net architecture for image to image mappings"""
 
-    def __init__(self, in_channels=1, out_channels=1, features=[32, 64], renorm=True):
+    def __init__(
+        self, in_channels=1, out_channels=1, features=[32, 64], renorm=True, beta=0.0
+    ):
         super().__init__()
         self.renorm = renorm
         # Encoder
@@ -127,6 +134,11 @@ class UNet3D(nn.Module):
 
         # Final 1×1×1 conv
         self.final_conv = nn.Conv3d(features[0], out_channels, kernel_size=1)
+
+        if beta == 0:
+            self.non_lin_layer = nn.ReLU(inplace=True)
+        else:
+            self.non_lin_layer = nn.Softplus(beta=beta)
 
     def forward(self, x):
         # PET images can have arbitrary global scales, but we don't want to
@@ -165,7 +177,7 @@ class UNet3D(nn.Module):
         if self.renorm:
             unet_out = unet_out * sample_scales
 
-        return F.relu(input_x - unet_out)
+        return self.non_lin_layer(input_x - unet_out)
 
 
 class LMNet(torch.nn.Module):
