@@ -304,12 +304,7 @@ torch.save(
 )
 
 # save ground truth to separate file which allows faster training of img to img model
-torch.save(
-    {
-        "x_true": x_true,
-    },
-    odir / "ground_truth.pt",
-)
+torch.save(x_true, odir / "ground_truth.pt")
 
 
 with open(odir / "projector_parameters.json", "w", encoding="UTF8") as f:

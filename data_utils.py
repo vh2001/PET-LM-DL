@@ -14,7 +14,8 @@ def load_lm_pet_data(odir: Path, skip_raw_data: bool = False):
         return torch.load(odir / "ground_truth.pt")
     else:
         data_tensors = torch.load(odir / "data_tensors.pt")
-        x_true = data_tensors["x_true"]
+        ground_truth = torch.load(odir / "ground_truth.pt")
+        x_true = ground_truth
         event_start_coords = data_tensors["event_start_coords"]
         event_end_coords = data_tensors["event_end_coords"]
         event_tofbins = data_tensors["event_tofbins"]
