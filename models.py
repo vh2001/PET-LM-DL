@@ -8,6 +8,23 @@ from collections import OrderedDict
 from utils import LMNegPoissonLogLGradientLayer, to_np, plot_batch_intermediate_images
 
 
+class ScaledSoftplus(nn.Module):
+    """
+    Differentiable alternative to ReLU for ensuring non-negative outputs.
+    
+    f(x) = beta * softplus(x/beta)
+    
+    As beta -> 0: approaches ReLU (sharp)
+    As beta -> inf: approaches linear function
+    """
+    def __init__(self, beta=1.0):
+        super().__init__()
+        self.beta = beta
+
+    def forward(self, x):
+        return self.beta * F.softplus(x / self.beta)
+
+
 class MiniConvNet(torch.nn.Module):
     def __init__(
         self,
@@ -109,11 +126,18 @@ class UpSampleConv(nn.Module):
 class UNet3D(nn.Module):
     """3D U-Net architecture for image to image mappings"""
 
-    def __init__(
-        self, in_channels=1, out_channels=1, features=[32, 64], renorm=True, beta=0.0
-    ):
+    def __init__(self, in_channels=1, out_channels=1, features=[32, 64], renorm=True, use_scaled_softplus=False, softplus_beta=1.0):
         super().__init__()
         self.renorm = renorm
+        self.use_scaled_softplus = use_scaled_softplus
+        self.softplus_beta = softplus_beta
+
+        if use_scaled_softplus:
+            self.activation = ScaledSoftplus(beta=softplus_beta)
+        else:
+            self.activation = F.ReLU()
+
+
         # Encoder
         self.downs = nn.ModuleList()
         self.pools = nn.ModuleList()
@@ -177,7 +201,7 @@ class UNet3D(nn.Module):
         if self.renorm:
             unet_out = unet_out * sample_scales
 
-        return self.non_lin_layer(input_x - unet_out)
+        return self.activation(input_x - unet_out)
 
 
 class LMNet(torch.nn.Module):

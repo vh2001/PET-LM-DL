@@ -78,6 +78,12 @@ parser.add_argument(
     action="store_true",
     help="Print gradient norms during training (useful for debugging)",
 )
+parser.add_argument(
+    "--custom_tag",
+    type=str,
+    default="",
+    help="Custom tag for the experiment",
+)
 
 args = parser.parse_args()
 
@@ -94,9 +100,14 @@ denoiser_model_path: Path = Path(args.denoiser_model_path)
 num_blocks: int = args.num_blocks
 count_level: float = args.count_level
 model_kwargs: dict = args.model_kwargs
+custom_tag: str = args.custom_tag
 
 # create a directory for the model checkpoints
-run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+if custom_tag != "":
+    run_id = f"{custom_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+else:
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
 model_dir = Path(f"checkpoints_unrolled/lmnet_run_{run_id}")
 model_dir.mkdir(parents=True, exist_ok=True)
 
