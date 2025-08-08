@@ -8,23 +8,6 @@ from collections import OrderedDict
 from utils import LMNegPoissonLogLGradientLayer, to_np, plot_batch_intermediate_images
 
 
-class ScaledSoftplus(nn.Module):
-    """
-    Differentiable alternative to ReLU for ensuring non-negative outputs.
-    
-    f(x) = beta * softplus(x/beta)
-    
-    As beta -> 0: approaches ReLU (sharp)
-    As beta -> inf: approaches linear function
-    """
-    def __init__(self, beta=1.0):
-        super().__init__()
-        self.beta = beta
-
-    def forward(self, x):
-        return self.beta * F.softplus(x / self.beta)
-
-
 class MiniConvNet(torch.nn.Module):
     def __init__(
         self,
@@ -126,17 +109,22 @@ class UpSampleConv(nn.Module):
 class UNet3D(nn.Module):
     """3D U-Net architecture for image to image mappings"""
 
-    def __init__(self, in_channels=1, out_channels=1, features=[32, 64], renorm=True, use_scaled_softplus=False, softplus_beta=1.0):
+    def __init__(
+        self,
+        in_channels=1,
+        out_channels=1,
+        features=[32, 64],
+        renorm=True,
+        softplus_beta=1.0,
+    ):
         super().__init__()
         self.renorm = renorm
-        self.use_scaled_softplus = use_scaled_softplus
         self.softplus_beta = softplus_beta
 
-        if use_scaled_softplus:
-            self.activation = ScaledSoftplus(beta=softplus_beta)
+        if softplus_beta == 0:
+            self.activation = torch.nn.Softplus(beta=softplus_beta)
         else:
-            self.activation = F.ReLU()
-
+            self.activation = torch.nn.ReLU(inplace=True)
 
         # Encoder
         self.downs = nn.ModuleList()
@@ -158,11 +146,6 @@ class UNet3D(nn.Module):
 
         # Final 1×1×1 conv
         self.final_conv = nn.Conv3d(features[0], out_channels, kernel_size=1)
-
-        if beta == 0:
-            self.non_lin_layer = nn.ReLU(inplace=True)
-        else:
-            self.non_lin_layer = nn.Softplus(beta=beta)
 
     def forward(self, x):
         # PET images can have arbitrary global scales, but we don't want to
