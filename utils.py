@@ -103,12 +103,11 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
             # loop over all samples in the batch and apply linear operator
             # to the first channel
             for i in range(batch_size):
-                x[i, 0, ...] = (
-                    lm_fwd_operators[i].adjoint(
-                        lm_fwd_operators[i](grad_output[i, 0, ...].detach())
-                        / z_lists[i] ** 2
+                x[i, 0, ...] = lm_fwd_operators[i].adjoint(
+                    lm_fwd_operators[i](
+                        grad_output[i, 0, ...].detach() * diag_precond_list[i]
                     )
-                    * diag_precond_list[i]
+                    / z_lists[i] ** 2
                 )
 
             return x, None, None, None, None
@@ -295,3 +294,88 @@ def plot_batch_intermediate_images(x_intermed):
 
 
 # 3. Define the full model
+
+if __name__ == "__main__":
+    import torch
+
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tof = True
+
+    img_shape = (5, 5, 5)
+    voxel_size = (1, 1, 1)
+    img_origin = None
+
+    event_start = []
+    event_end = []
+
+    for i in range(img_shape[0]):
+        for j in range(img_shape[1]):
+            event_start.append([-20, i - img_shape[1] // 2, j - img_shape[2] // 2])
+            event_end.append([20, i - img_shape[1] // 2, j - img_shape[2] // 2])
+
+    event_start.append([-20, -20, 0])
+    event_start.append([-20, -20, -20])
+
+    event_end.append([20, 20, 0])
+    event_end.append([20, 20, 20])
+
+    event_start = torch.tensor(event_start, device=dev, dtype=torch.float32)
+    event_end = torch.tensor(event_end, device=dev, dtype=torch.float32)
+
+    num_events = event_start.shape[0]
+
+    lm_proj = parallelproj.ListmodePETProjector(
+        event_start,
+        event_end,
+        img_shape=img_shape,
+        voxel_size=voxel_size,
+        img_origin=img_origin,
+    )
+
+    if tof:
+        lm_proj.tof_parameters = parallelproj.TOFParameters(
+            num_tofbins=3, tofbin_width=2.0, sigma_tof=2.0
+        )
+        lm_proj.event_tofbins = (
+            torch.randint(lm_proj.tof_parameters.num_tofbins, (num_events,))
+            - lm_proj.tof_parameters.num_tofbins // 2
+        )
+        lm_proj.tof = True
+
+    # %%
+
+    # create a fake sens. image (lm back proj instead of full backproj)
+    adjoint_ones = [
+        lm_proj.adjoint(torch.ones(num_events, device=dev, dtype=torch.float32)),
+        lm_proj.adjoint(torch.ones(num_events, device=dev, dtype=torch.float32)),
+    ]
+
+    contam_lists = [
+        0.05 * torch.rand(num_events, device=dev, dtype=torch.float32),
+        0.1 * torch.rand(num_events, device=dev, dtype=torch.float32),
+    ]
+
+    lm_projs = [lm_proj, lm_proj]
+
+    diag_precond_list = [
+        torch.rand(*img_shape, device=dev, dtype=torch.float32),
+        torch.rand(*img_shape, device=dev, dtype=torch.float32),
+    ]
+
+    x = torch.rand(2, 1, *img_shape, device=dev, dtype=torch.float32)
+
+    # %%
+    lm_grad_layer = LMNegPoissonLogLGradientLayer.apply
+
+    f1 = lm_grad_layer(x, lm_projs, contam_lists, adjoint_ones, diag_precond_list)
+
+    if True:
+        print("starting gradcheck")
+        x.requires_grad = True
+        grad_test = torch.autograd.gradcheck(
+            lm_grad_layer,
+            (x, lm_projs, contam_lists, adjoint_ones, diag_precond_list),
+            eps=1e-3,
+            atol=1e-3,
+            rtol=1e-3,
+        )
