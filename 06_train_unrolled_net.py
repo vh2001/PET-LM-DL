@@ -205,7 +205,7 @@ model = LMNet(conv_nets, num_blocks, **model_kwargs).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 criterion = torch.nn.MSELoss()
 
-psnr = PeakSignalNoiseRatio().to(device)
+psnr = PeakSignalNoiseRatio(data_range=(0, 4)).to(device)
 
 # save model architecture
 with open(model_dir / "lmnet_architecture.txt", "w", encoding="UTF8") as f:

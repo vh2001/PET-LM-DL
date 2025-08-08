@@ -161,7 +161,7 @@ model = DENOISER_MODEL_REGISTRY[model_class](**model_kwargs).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 criterion = torch.nn.MSELoss()
 
-psnr = PeakSignalNoiseRatio().to(device)
+psnr = PeakSignalNoiseRatio(data_range=(0, 4)).to(device)
 
 # save model architecture
 val_psnr = torch.zeros(num_epochs)

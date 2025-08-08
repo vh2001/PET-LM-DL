@@ -81,7 +81,7 @@ model.to(device)
 
 # %%
 
-psnr = PeakSignalNoiseRatio().to(device)
+psnr = PeakSignalNoiseRatio(data_range=(0, 4)).to(device)
 
 # ---- Evaluation Loop ----
 val_losses = []

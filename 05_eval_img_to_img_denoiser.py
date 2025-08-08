@@ -74,7 +74,7 @@ model = DENOISER_MODEL_REGISTRY[model_class](**model_kwargs)
 model.load_state_dict(checkpoint["model_state_dict"])
 model.to(device)
 
-psnr = PeakSignalNoiseRatio().to(device)
+psnr = PeakSignalNoiseRatio(data_range=(0, 4)).to(device)
 
 # %%
 # validation loop
