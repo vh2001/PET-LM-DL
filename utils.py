@@ -248,70 +248,39 @@ def plot_batch_intermediate_images(x_intermed):
         fig.savefig(f"intermediate_images_sample_{sample_idx}.png")
 
 
-# class SmoothLeakyClippedReLU(torch.nn.Module):
-#    def __init__(self, alpha=-0.1):
-#        super().__init__()
-#        self.alpha = alpha
-#        self.a = (1 - alpha) / 2
-#        self.b = alpha
-#        self.d = (alpha - 1) / 2
-#
-#    def forward(self, x):
-#        a, b, d = self.a, self.b, self.d
-#        return torch.where(
-#            x <= 0, self.alpha * x, torch.where(x < 1, a * x**2 + b * x, x + d)
-#        )
-#
-#
-# class ParamSmoothLeakyReLU(torch.nn.Module):
-#    def __init__(self, alpha: float, beta: float):
-#        """
-#        f(x) = alpha*x + (1-alpha) * Softplus(beta*x) / beta
-#
-#        - alpha controls the negative slope, reasoabke value 0.02
-#        - beta > 0 controls how quickly f(x) -> x for x > 0.
-#            small beta: slow, gentle transition
-#            large beta: sharp, nearly ReLU-like transition at x≈0
-#            reasonable value 4.0
-#
-#        Requires: 0 <= alpha < 1, beta > 0.
-#        """
-#        super().__init__()
-#        if not (0.0 <= alpha < 1.0):
-#            raise ValueError(f"alpha must be in [0,1), got {alpha}")
-#        if beta <= 0:
-#            raise ValueError(f"beta must be positive, got {beta}")
-#        self.alpha = alpha
-#        self.beta = beta
-#
-#    def forward(self, x: torch.Tensor) -> torch.Tensor:
-#        # scaled softplus: (1/beta)*log(1 + exp(beta*x))
-#        sp = F.softplus(self.beta * x) / self.beta
-#        return self.alpha * x + (1.0 - self.alpha) * sp
-
-
-# 2. Define a mini 3D conv net block
-
-
-# 3. Define the full model
-
 if __name__ == "__main__":
+    ####################################################################
+    ### GRADCHECK THE IMPLEMENTATION OF THE LMPOISSONGRADLAYER #########
+    ####################################################################
     import torch
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(0)
     tof = True
 
     img_shape = (5, 5, 5)
     voxel_size = (1, 1, 1)
     img_origin = None
 
+    # %%
+    # setup a few pseudo random events
+
     event_start = []
     event_end = []
 
-    for i in range(img_shape[0]):
-        for j in range(img_shape[1]):
+    for i in range(img_shape[1]):
+        for j in range(img_shape[2]):
             event_start.append([-20, i - img_shape[1] // 2, j - img_shape[2] // 2])
             event_end.append([20, i - img_shape[1] // 2, j - img_shape[2] // 2])
+
+    for i in range(img_shape[0]):
+        for j in range(img_shape[1]):
+            event_start.append(
+                [i - img_shape[0] // 2 + 0.5, j - img_shape[1] // 2 + 0.5, -20]
+            )
+            event_end.append(
+                [i - img_shape[0] // 2 - 0.5, j - img_shape[1] // 2 - 0.5, 20]
+            )
 
     event_start.append([-20, -20, 0])
     event_start.append([-20, -20, -20])
@@ -334,7 +303,7 @@ if __name__ == "__main__":
 
     if tof:
         lm_proj.tof_parameters = parallelproj.TOFParameters(
-            num_tofbins=3, tofbin_width=2.0, sigma_tof=2.0
+            num_tofbins=5, tofbin_width=1.2, sigma_tof=1.2
         )
         lm_proj.event_tofbins = (
             torch.randint(lm_proj.tof_parameters.num_tofbins, (num_events,))
@@ -378,4 +347,5 @@ if __name__ == "__main__":
             eps=1e-3,
             atol=1e-3,
             rtol=1e-3,
+            nondet_tol=1e-5,  # we don't expect to get the exact same result every time due the parallel sums and float issues
         )
