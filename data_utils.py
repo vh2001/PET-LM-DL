@@ -121,10 +121,10 @@ def brainweb_collate_fn(batch):
         "target": torch.stack([item["target"].unsqueeze(0) for item in batch]),
         "lm_pet_lin_ops": [item["lm_pet_lin_op"] for item in batch],
         "contamination_lists": [item["contamination_list"] for item in batch],
-        "adjoint_ones": [item["adjoint_ones"] for item in batch],
-        "diag_preconds": [
+        "adjoint_ones": torch.stack([item["adjoint_ones"] for item in batch]),
+        "diag_preconds": torch.stack([
             item["input"] / item["adjoint_ones"] + 1e-6 for item in batch
-        ],
+        ]),
     }
 
 

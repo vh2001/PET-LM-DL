@@ -17,8 +17,8 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
         x: torch.Tensor,
         lm_fwd_operators: list[parallelproj.LinearOperator],
         contam_lists: list[torch.Tensor],
-        adjoint_ones: list[torch.Tensor],
-        diag_precond_list: list[torch.Tensor],
+        adjoint_ones: torch.Tensor,
+        diag_preconds: torch.Tensor,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """forward pass of listmode negative Poisson logL gradient descent layer
 
@@ -30,11 +30,11 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
             each linear operator that can act on a single 3D image
         contam_lists : list of torch.Tensors
             list of listmode contamination (scatter and randoms) with dimension (num_events)
-        adjoint_ones : torch.Tensor
-            list of 3D images of adjoint of the (full not listmode) linear operator applied to ones
+        adjoint_ones : torch.Tensor (batch_size, num_voxels_x, num_voxels_y, num_voxels_z)
+            3D images of adjoint of the (full not listmode) linear operator applied to ones
             (num_voxels_x, num_voxels_y, num_voxels_z)
-        diag_precond_list : list of torch.Tensors
-            list of diagonal preconditioners with dimension (num_voxels_x, num_voxels_y, num_voxels_z)
+        diag_precond_list : torch.Tensor (batch_size, num_voxels_x, num_voxels_y, num_voxels_z)
+            diagonal preconditioners with dimension (num_voxels_x, num_voxels_y, num_voxels_z)
 
         Returns
         -------
@@ -56,11 +56,11 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
             z_lists.append(lm_fwd_operators[i](x[i, 0, ...].detach()) + contam_lists[i])
             g[i, 0, ...] = (
                 adjoint_ones[i] - lm_fwd_operators[i].adjoint(1 / z_lists[i])
-            ) * diag_precond_list[i]
+            ) * diag_preconds[i]
 
         ctx.lm_fwd_operators = lm_fwd_operators
         ctx.z_lists = z_lists
-        ctx.diag_precond_list = diag_precond_list
+        ctx.diag_preconds = diag_preconds
 
         return g
 
@@ -92,10 +92,6 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
         if grad_output is None:
             return None, None, None, None, None
         else:
-            lm_fwd_operators = ctx.lm_fwd_operators
-            z_lists = ctx.z_lists
-            diag_precond_list = ctx.diag_precond_list
-
             batch_size = grad_output.shape[0]
 
             x = torch.zeros_like(grad_output)
@@ -103,11 +99,11 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
             # loop over all samples in the batch and apply linear operator
             # to the first channel
             for i in range(batch_size):
-                x[i, 0, ...] = lm_fwd_operators[i].adjoint(
-                    lm_fwd_operators[i](
-                        grad_output[i, 0, ...].detach() * diag_precond_list[i]
+                x[i, 0, ...] = ctx.lm_fwd_operators[i].adjoint(
+                    ctx.lm_fwd_operators[i](
+                        grad_output[i, 0, ...].detach() * ctx.diag_preconds[i]
                     )
-                    / z_lists[i] ** 2
+                    / ctx.z_lists[i] ** 2
                 )
 
             return x, None, None, None, None
@@ -314,10 +310,10 @@ if __name__ == "__main__":
     # %%
 
     # create a fake sens. image (lm back proj instead of full backproj)
-    adjoint_ones = [
+    adjoint_ones = torch.stack([
         lm_proj.adjoint(torch.ones(num_events, device=dev, dtype=torch.float32)),
         lm_proj.adjoint(torch.ones(num_events, device=dev, dtype=torch.float32)),
-    ]
+    ])
 
     contam_lists = [
         0.05 * torch.rand(num_events, device=dev, dtype=torch.float32),
@@ -326,24 +322,24 @@ if __name__ == "__main__":
 
     lm_projs = [lm_proj, lm_proj]
 
-    diag_precond_list = [
+    diag_preconds = torch.stack([
         torch.rand(*img_shape, device=dev, dtype=torch.float32),
         torch.rand(*img_shape, device=dev, dtype=torch.float32),
-    ]
+    ])
 
     x = torch.rand(2, 1, *img_shape, device=dev, dtype=torch.float32)
 
     # %%
     lm_grad_layer = LMNegPoissonLogLGradientLayer.apply
 
-    f1 = lm_grad_layer(x, lm_projs, contam_lists, adjoint_ones, diag_precond_list)
+    f1 = lm_grad_layer(x, lm_projs, contam_lists, adjoint_ones, diag_preconds)
 
     if True:
         print("starting gradcheck")
         x.requires_grad = True
         grad_test = torch.autograd.gradcheck(
             lm_grad_layer,
-            (x, lm_projs, contam_lists, adjoint_ones, diag_precond_list),
+            (x, lm_projs, contam_lists, adjoint_ones, diag_preconds),
             eps=1e-3,
             atol=1e-3,
             rtol=1e-3,
