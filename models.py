@@ -194,6 +194,7 @@ class LMNet(torch.nn.Module):
         num_blocks: int,
         use_data_fidelity: bool = True,
         weight_sharing: bool = False,
+        fixed_precond: bool = True,
     ):
         """Unrolled neural network for PET image reconstruction using listmode (LM) data.
 
@@ -210,6 +211,9 @@ class LMNet(torch.nn.Module):
             whether to do a preconditioned data fidelity gradient step
             before the neural network step in every block, by default True
             (useful to test how much data fidelity helps)
+        fixed_precond: bool, optional
+            whether to use a fixed diag. MLEM precond. based on the model input image
+            if False, the precond. is based on the input to every block
         """
         super().__init__()
 
@@ -229,6 +233,7 @@ class LMNet(torch.nn.Module):
 
         self.lm_logL_grad_layer = LMNegPoissonLogLGradientLayer.apply
         self.use_data_fidelity = use_data_fidelity
+        self.fixed_precond = fixed_precond
 
     def forward(
         self,
@@ -247,9 +252,15 @@ class LMNet(torch.nn.Module):
             if self.use_data_fidelity:
                 # (preconditioned) gradient step on the data fidelity term
                 # xd = x - diag_preconditioner * \nabla_x PET_data_fidelity(x)
-                xd = x - self.lm_logL_grad_layer(
-                    x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
-                )
+                if self.fixed_precond:
+                    xd = x - self.lm_logL_grad_layer(
+                        x, lm_pet_lin_ops, contamination_lists, adjoint_ones, diag_preconds
+                    )
+                else:
+                    pcs = (x / adjoint_ones.unsqueeze(1) + 1e-6)
+                    xd = x - pcs * self.lm_logL_grad_layer(
+                        x, lm_pet_lin_ops, contamination_lists, adjoint_ones, None
+                    )
             else:
                 xd = x
 
@@ -285,21 +296,3 @@ def detailed_param_count(model):
 
 ### DONT FORGET TO ADD YOUR CUSTOM DENOISING MODEL TO THE REGISTRY ###
 DENOISER_MODEL_REGISTRY = {"MiniConvNet": MiniConvNet, "UNet3D": UNet3D}
-
-# Example usage
-if __name__ == "__main__":
-    xb = torch.randn(1, 1, 57, 71, 93)
-    model = UNet3D(in_channels=1, out_channels=1, features=[16, 32])
-    out = model(xb)
-    print("Output shape:", out.shape)
-
-    detailed_param_count(model)
-
-    torch.onnx.export(
-        model,
-        xb,
-        "unet3d.onnx",
-        input_names=["input"],
-        output_names=["output"],
-        opset_version=12,
-    )
