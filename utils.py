@@ -18,7 +18,7 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
         lm_fwd_operators: list[parallelproj.LinearOperator],
         contam_lists: list[torch.Tensor],
         adjoint_ones: torch.Tensor,
-        diag_preconds: torch.Tensor,
+        diag_preconds: torch.Tensor | None,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """forward pass of listmode negative Poisson logL gradient descent layer
 
@@ -33,7 +33,7 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
         adjoint_ones : torch.Tensor (batch_size, num_voxels_x, num_voxels_y, num_voxels_z)
             3D images of adjoint of the (full not listmode) linear operator applied to ones
             (num_voxels_x, num_voxels_y, num_voxels_z)
-        diag_precond_list : torch.Tensor (batch_size, num_voxels_x, num_voxels_y, num_voxels_z)
+        diag_precond_list : torch.Tensor (batch_size, num_voxels_x, num_voxels_y, num_voxels_z) or None
             diagonal preconditioners with dimension (num_voxels_x, num_voxels_y, num_voxels_z)
 
         Returns
@@ -56,7 +56,9 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
             z_lists.append(lm_fwd_operators[i](x[i, 0, ...].detach()) + contam_lists[i])
             g[i, 0, ...] = (
                 adjoint_ones[i] - lm_fwd_operators[i].adjoint(1 / z_lists[i])
-            ) * diag_preconds[i]
+            ) 
+            if diag_preconds is not None:
+                g[i, 0, ...] *= diag_preconds[i]
 
         ctx.lm_fwd_operators = lm_fwd_operators
         ctx.z_lists = z_lists
@@ -99,11 +101,11 @@ class LMNegPoissonLogLGradientLayer(torch.autograd.Function):
             # loop over all samples in the batch and apply linear operator
             # to the first channel
             for i in range(batch_size):
+                tmp = grad_output[i, 0, ...].detach() 
+                if ctx.diag_preconds is not None:
+                    tmp *= ctx.diag_preconds[i]
                 x[i, 0, ...] = ctx.lm_fwd_operators[i].adjoint(
-                    ctx.lm_fwd_operators[i](
-                        grad_output[i, 0, ...].detach() * ctx.diag_preconds[i]
-                    )
-                    / ctx.z_lists[i] ** 2
+                    ctx.lm_fwd_operators[i](tmp) / ctx.z_lists[i] ** 2
                 )
 
             return x, None, None, None, None
@@ -309,12 +311,6 @@ if __name__ == "__main__":
 
     # %%
 
-    # create a fake sens. image (lm back proj instead of full backproj)
-    adjoint_ones = torch.stack([
-        lm_proj.adjoint(torch.ones(num_events, device=dev, dtype=torch.float32)),
-        lm_proj.adjoint(torch.ones(num_events, device=dev, dtype=torch.float32)),
-    ])
-
     contam_lists = [
         0.05 * torch.rand(num_events, device=dev, dtype=torch.float32),
         0.1 * torch.rand(num_events, device=dev, dtype=torch.float32),
@@ -322,17 +318,16 @@ if __name__ == "__main__":
 
     lm_projs = [lm_proj, lm_proj]
 
-    diag_preconds = torch.stack([
-        torch.rand(*img_shape, device=dev, dtype=torch.float32),
-        torch.rand(*img_shape, device=dev, dtype=torch.float32),
-    ])
-
     x = torch.rand(2, 1, *img_shape, device=dev, dtype=torch.float32)
+
+    adjoint_ones = torch.rand(x.shape[0], *img_shape, device=dev, dtype=torch.float32)
+    diag_preconds = torch.rand(x.shape[0], *img_shape, device=dev, dtype=torch.float32)
 
     # %%
     lm_grad_layer = LMNegPoissonLogLGradientLayer.apply
 
     f1 = lm_grad_layer(x, lm_projs, contam_lists, adjoint_ones, diag_preconds)
+    f2 = lm_grad_layer(x, lm_projs, contam_lists, adjoint_ones, None)
 
     if True:
         print("starting gradcheck")
@@ -340,6 +335,15 @@ if __name__ == "__main__":
         grad_test = torch.autograd.gradcheck(
             lm_grad_layer,
             (x, lm_projs, contam_lists, adjoint_ones, diag_preconds),
+            eps=1e-3,
+            atol=1e-3,
+            rtol=1e-3,
+            nondet_tol=1e-5,  # we don't expect to get the exact same result every time due the parallel sums and float issues
+        )
+
+        grad_test2 = torch.autograd.gradcheck(
+            lm_grad_layer,
+            (x, lm_projs, contam_lists, adjoint_ones, None),
             eps=1e-3,
             atol=1e-3,
             rtol=1e-3,
