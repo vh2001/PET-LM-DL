@@ -4,6 +4,10 @@ checkpoints_denoiser/*
 checkpoints_unrolled/*
 checkpoints/*
 promising_checkpoints/*
+wavelet_transform/*
+optuna_models_MiniConvNet/*
+optuna_models_UNet3D/*
+optuna_models_unrolled/*
 data/*
 run.sh
 run.py
