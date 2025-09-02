@@ -1,6 +1,45 @@
+import os
 import argparse
-import matplotlib.pyplot as plt
+import sys
+def setup_gpu_environment():
+    """
+    Parse GPU selection from command line and set up environment before any PyTorch imports.
+    This must be called before importing torch or any other CUDA libraries.
+    """
+    # Create a simple parser just for GPU selection
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--gpu_id", 
+        type=int, 
+        default=0, 
+        help="GPU ID to use (will be remapped to cuda:0)"
+    )
+    parser.add_argument(
+        "--visible_gpus",
+        type=str,
+        default=None,
+        help="Comma-separated list of GPU IDs to make visible (e.g., '0,1,2')"
+    )
+    
+    # Parse only known args to avoid conflicts with your main parser
+    args, _ = parser.parse_known_args()
+    
+    if args.visible_gpus is not None:
+        # User specified custom GPU visibility
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpus
+        print(f"Set CUDA_VISIBLE_DEVICES to: {args.visible_gpus}")
+    else:
+        # Single GPU mode - map specified GPU to cuda:0
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+        print(f"Remapping GPU {args.gpu_id} to cuda:0")
+    
+    return args.gpu_id
 
+
+# Call this BEFORE any other imports
+if __name__ == "__main__":
+    selected_gpu = setup_gpu_environment()
+import matplotlib.pyplot as plt
 import json
 import torch
 from torch.utils.data import DataLoader
@@ -27,6 +66,19 @@ def parse_json_model_kwargs(arg: str):
 
 # input parameters
 parser = argparse.ArgumentParser(description="Train LMNet for PET image reconstruction")
+parser.add_argument(
+    "--gpu_id", 
+    type=int, 
+    default=0, 
+    help="GPU ID to use (will be remapped to cuda:0)"
+)
+parser.add_argument(
+    "--visible_gpus",
+    type=str,
+    default=None,
+    help="Comma-separated list of GPU IDs to make visible (e.g., '0,1,2')"
+)
+
 parser.add_argument(
     "denoiser_model_path",
     type=str,
@@ -85,6 +137,19 @@ parser.add_argument(
     help="Custom tag for the experiment",
 )
 
+parser.add_argument(
+    "--device",
+    type=str,
+    default="cuda" if torch.cuda.is_available() else "cpu",
+    help="Device to use for training (e.g., 'cuda' or 'cpu')",
+)
+
+parser.add_argument(
+    "--adaptive_lr",
+    action="store_true",
+    help="Use adaptive learning rate",
+)
+
 args = parser.parse_args()
 
 seed = args.seed
@@ -101,6 +166,16 @@ num_blocks: int = args.num_blocks
 count_level: float = args.count_level
 model_kwargs: dict = args.model_kwargs
 custom_tag: str = args.custom_tag
+adaptive_lr: bool = args.adaptive_lr
+device = torch.device(args.device)
+
+if args.device.startswith('cuda'):
+    # Force PyTorch to use a specific GPU
+    torch.cuda.set_device(args.device)
+    print(f"Using device: {args.device}")
+    print(f"CUDA device name: {torch.cuda.get_device_name()}")
+
+
 
 # create a directory for the model checkpoints
 if custom_tag != "":
@@ -164,19 +239,20 @@ val_loader = DataLoader(
 # load the pre-trained denoiser model
 ################################################################################
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # %% load the denoiser model
 # load "num_features" from args.json in the same directory as the denoiser model
 
 # load the checkpoint
 denoiser_checkpoint = torch.load(denoiser_model_path, map_location="cpu")
+# fix typo in checkpoint if necessary
+print(f"Loading denoiser model from {denoiser_checkpoint["model_class"]}")
+if denoiser_checkpoint["model_class"] == "Unet3D":
+    denoiser_checkpoint["model_class"] = "UNet3D"
 denoiser_model_class = denoiser_checkpoint["model_class"]
 denoiser_model_kwargs = denoiser_checkpoint["model_kwargs"]
 
 # model setup
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 # in principle we can have any NN here
 # if we want to use in in combination with data fidelity gradient layers,
 # we should make sure that the output is non-negative
@@ -215,14 +291,29 @@ print(f"Model architecture saved to {model_dir / 'lmnet_architecture.txt'}")
 val_psnr = torch.zeros(num_epochs)
 val_loss_avg = torch.zeros(num_epochs)
 train_loss_avg = torch.zeros(num_epochs)
+learning_rates = torch.zeros(num_epochs)
 
 # %%
 # training + validation loop
 ################################################################################
 
+# set lr scheduler if adaptive learning rate is enabled
+if adaptive_lr:
+    # use a simple step LR scheduler that reduces the learning rate by a factor of 10 every 30 epochs
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer, mode="min", factor=0.5, patience=30, verbose=True
+    # )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=30
+            )
+    print("Using adaptive learning rate with StepLR scheduler.")
+
 # training loop
 model.train()
 for epoch in range(1, num_epochs + 1):
+    # Track learning rate at the beginning of each epoch
+    learning_rates[epoch - 1] = optimizer.param_groups[0]['lr']
+    
     batch_losses = torch.zeros(len(train_loader))
     for batch_idx, batch in enumerate(train_loader):
         x = batch["input"].to(device)
@@ -263,7 +354,10 @@ for epoch in range(1, num_epochs + 1):
     print(
         f"\nEpoch [{epoch:04}/{num_epochs:04}] tr.  loss: {loss_avg:.2E} +- {loss_std:.2E}"
     )
-
+    if adaptive_lr:
+        # step the scheduler with the validation loss
+        scheduler.step()
+        print(f"Learning rate adjusted by scheduler: {optimizer.param_groups[0]['lr']:.2E}")
     # validation loop
     model.eval()
     with torch.no_grad():
@@ -307,6 +401,7 @@ for epoch in range(1, num_epochs + 1):
             f"Epoch [{epoch:04}/{num_epochs:04}] val. PSNR: {val_psnr[epoch - 1]:.2E}"
         )
 
+    
     # save model checkpoint
     torch.save(
         {
@@ -337,19 +432,22 @@ for epoch in range(1, num_epochs + 1):
         print(f"Best model symlinked to {best_model_path} -> {epoch_model_path.name}")
 
     # plot the validation PSNR
-    fig, ax = plt.subplots(3, 2, layout="constrained", figsize=(12, 6), sharex="col")
+    fig, ax = plt.subplots(4, 2, layout="constrained", figsize=(12, 8), sharex="col")
     epochs = range(1, epoch + 1)
     ax[0, 0].semilogy(epochs, train_loss_avg[:epoch].cpu().numpy())
     ax[1, 0].semilogy(epochs, val_loss_avg[:epoch].cpu().numpy())
     ax[2, 0].plot(epochs, val_psnr[:epoch].cpu().numpy())
+    ax[3, 0].semilogy(epochs, learning_rates[:epoch].cpu().numpy())
 
     ax[0, 1].loglog(epochs, train_loss_avg[:epoch].cpu().numpy())
     ax[1, 1].loglog(epochs, val_loss_avg[:epoch].cpu().numpy())
     ax[2, 1].semilogx(epochs, val_psnr[:epoch].cpu().numpy())
+    ax[3, 1].loglog(epochs, learning_rates[:epoch].cpu().numpy())
 
     ax[0, 0].set_ylabel("training loss")
     ax[1, 0].set_ylabel("validation loss")
     ax[2, 0].set_ylabel("validation PSNR (dB)")
+    ax[3, 0].set_ylabel("learning rate")
 
     ax[-1, 0].set_xlabel("Epoch")
     ax[-1, 1].set_xlabel("Epoch")
