@@ -75,13 +75,14 @@ class BrainwebLMPETDataset(torch.utils.data.Dataset):
     """
 
     def __init__(
-        self, data_dirs: list[Path], shuffle: bool = True, skip_raw_data: bool = False
+        self, data_dirs: list[Path], shuffle: bool = True, skip_raw_data: bool = False, use_early_mlem: bool = True
     ):
         self._data_dirs = data_dirs.copy()
         if shuffle:
             idx = torch.randperm(len(self._data_dirs))
             self._data_dirs = [self._data_dirs[i] for i in idx]
         self._skip_raw_data = skip_raw_data
+        self._use_early_mlem = use_early_mlem
 
     @property
     def data_dirs(self):
@@ -92,9 +93,14 @@ class BrainwebLMPETDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         odir = self._data_dirs[idx]
-        input_img = torch.load(odir / "mlem_reconstructions.pt")[
-            "x_mlem_early_filtered"
-        ]
+        if self._use_early_mlem:
+            input_img = torch.load(odir / "mlem_reconstructions.pt")[
+                "x_mlem_early_filtered"
+            ]
+        else:
+            input_img = torch.load(odir / "mlem_reconstructions.pt")[
+                "x_mlem_filtered"
+            ]
 
         if self._skip_raw_data:
             return {
