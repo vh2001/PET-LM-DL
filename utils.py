@@ -197,7 +197,11 @@ def plot_batch_input_output_target(
 
 
 def plot_batch_intermediate_images(x_intermed):
-
+    # this fixes the crash when batch size is 1
+    if x_intermed.ndim == 4:
+        # Add a dimension of size 1 at axis 1 (the batch dimension)
+        # Shape changes from (num_blocks, D, H, W) to (num_blocks, 1, D, H, W)
+        x_intermed = np.expand_dims(x_intermed, axis=1)
     num_samples = x_intermed.shape[1]
     num_intermed_imgs = x_intermed.shape[0]
     nx = x_intermed.shape[2]
