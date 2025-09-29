@@ -222,7 +222,9 @@ def main():
     denoiser_model = DENOISER_MODEL_REGISTRY[denoiser_model_class](**denoiser_model_kwargs)
     denoiser_model.load_state_dict(denoiser_checkpoint["model_state_dict"])
 
-    weight_sharing = model_kwargs.get("weight_sharing", False)
+    # weight_sharing = model_kwargs.get("weight_sharing", False)
+    weight_sharing = args.weight_sharing
+    model_kwargs['weight_sharing'] = weight_sharing
     conv_nets = torch.nn.ModuleList([denoiser_model] if weight_sharing else [denoiser_model for _ in range(num_blocks)])
 
     model = LMNet(conv_nets, num_blocks, **model_kwargs).to(device)

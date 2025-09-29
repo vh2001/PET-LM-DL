@@ -267,7 +267,7 @@ denoiser_model.to(device)
 # setup of LMNet model (combination of data fidelity gradient layers and NNs)
 ################################################################################
 
-weight_sharing = model_kwargs.get("weight_sharing", False)
+model_kwargs['weight_sharing'] = weight_sharing
 
 if weight_sharing:
     conv_nets = torch.nn.ModuleList([denoiser_model])
